@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SPEC, FONTS, CAPTION_FONT, canvasSize, cellRect, paginate, formatStamp,
-  measureCaptionFont, drawCaption,
+  measureCaptionFont, drawCaption, exifDateTime,
 } from './timeline.js';
 
 const W = SPEC.ref; // 3077 — the width the source was measured at
@@ -154,4 +154,164 @@ test('timestamp formatting', () => {
   assert.equal(formatStamp(d, 'ko-KR'), '04:56, 목요일, 7월 09일');
   // Midnight and single-digit hours stay zero-padded.
   assert.equal(formatStamp(new Date(2026, 6, 9, 0, 5), 'en-US'), '00:05, Thursday, July 09');
+});
+
+/* ---------- EXIF capture time ---------- */
+
+// The JPEGs below are assembled byte by byte instead of committed as photos. A binary fixture
+// hides every offset the parser depends on, and the cases that matter most — big-endian, a
+// truncated head, a missing tag — are the ones no camera on hand produces.
+
+const be16 = (n) => [(n >> 8) & 255, n & 255];
+const chars = (s) => [...s].map((c) => c.charCodeAt(0));
+
+// A JPEG segment: 0xFF, marker, then a big-endian length that counts its own two bytes.
+const segment = (marker, payload) => [0xff, marker, ...be16(payload.length + 2), ...payload];
+const exifApp1 = (tiff) => segment(0xe1, [...chars('Exif'), 0, 0, ...tiff]);
+const jfifApp0 = segment(0xe0, [...chars('JFIF'), 0, 1, 2, 0, 0, 1, 0, 1, 0, 0]);
+const xmpApp1 = segment(0xe1, [...chars('http://ns.adobe.com/xap/1.0/'), 0, ...chars('<x/>')]);
+// SOI, the given segments, then SOS and two bytes standing in for the pixel data.
+const jpeg = (...segments) =>
+  new Uint8Array([0xff, 0xd8, ...segments.flat(), ...segment(0xda, [1, 0]), 0x7f, 0x7f, 0xff, 0xd9]);
+
+// A TIFF block: header, IFD0, an optional ExifIFD right behind it, then a heap for the values too
+// long for an entry's four-byte slot. Every offset in it is relative to the block's own start.
+// Tag values are written as LONG when given as a number, NUL-terminated ASCII when given as a string.
+function tiffBlock({ le = true, ifd0 = {}, exif = null } = {}) {
+  const u16 = (n) => (le ? [n & 255, (n >> 8) & 255] : be16(n));
+  const u32 = (n) => {
+    const b = [n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >>> 24) & 255];
+    return le ? b : b.reverse();
+  };
+  const num = (o) => Object.entries(o).map(([tag, val]) => [Number(tag), val]);
+  const entries0 = num(ifd0);
+  const entriesE = exif && num(exif);
+  const exifAt = 8 + 2 + 12 * (entries0.length + (entriesE ? 1 : 0)) + 4; // IFD0 is at 8, ExifIFD follows
+  let heapAt = exifAt + (entriesE ? 2 + 12 * entriesE.length + 4 : 0);
+  const heap = [];
+
+  const entry = ([tag, val]) => {
+    if (typeof val === 'number') return [...u16(tag), ...u16(4), ...u32(1), ...u32(val)]; // LONG, inline
+    const s = [...chars(val), 0];
+    const at = heapAt;
+    heap.push(...s);
+    heapAt += s.length;
+    return [...u16(tag), ...u16(2), ...u32(s.length), ...u32(at)]; // ASCII, on the heap
+  };
+
+  if (entriesE) entries0.push([0x8769, exifAt]); // the ExifIFD pointer
+  const ifd = (es) => [...u16(es.length), ...es.flatMap(entry), ...u32(0)];
+  const ifd0Bytes = ifd(entries0);
+  const exifBytes = entriesE ? ifd(entriesE) : [];
+  return [
+    ...(le ? [0x49, 0x49] : [0x4d, 0x4d]), ...u16(0x2a), ...u32(8),
+    ...ifd0Bytes, ...exifBytes, ...heap,
+  ];
+}
+
+const ORIGINAL = 0x9003;
+const DIGITIZED = 0x9004;
+const IFD0_DATE = 0x0132;
+const shot = (opts) => jpeg(jfifApp0, exifApp1(tiffBlock(opts)));
+const SOURCE_FIRST_FRAME = new Date(2026, 6, 9, 4, 56, 0);
+
+test('capture time comes out of a little-endian EXIF block', () => {
+  assert.deepEqual(exifDateTime(shot({ exif: { [ORIGINAL]: '2026:07:09 04:56:00' } })), SOURCE_FIRST_FRAME);
+});
+
+test('big-endian EXIF reads the same', () => {
+  const file = shot({ le: false, exif: { [ORIGINAL]: '2026:07:09 13:31:07' } });
+  assert.deepEqual(exifDateTime(file), new Date(2026, 6, 9, 13, 31, 7));
+});
+
+test('DateTimeOriginal wins, then Digitized, then IFD0 DateTime', () => {
+  const ifd0 = { [IFD0_DATE]: '2020:01:01 08:00:00' };
+  const dig = { [DIGITIZED]: '2024:02:02 02:02:02' };
+  assert.deepEqual(
+    exifDateTime(shot({ ifd0, exif: { [ORIGINAL]: '2026:07:09 04:56:00', ...dig } })),
+    SOURCE_FIRST_FRAME, 'the shutter time outranks both',
+  );
+  assert.deepEqual(exifDateTime(shot({ ifd0, exif: dig })), new Date(2024, 1, 2, 2, 2, 2), 'digitized');
+  assert.deepEqual(exifDateTime(shot({ ifd0, exif: {} })), new Date(2020, 0, 1, 8), 'empty ExifIFD');
+  assert.deepEqual(exifDateTime(shot({ ifd0 })), new Date(2020, 0, 1, 8), 'no ExifIFD at all');
+});
+
+test('a non-EXIF APP1 does not stop the walk', () => {
+  // Anything that has been through Photoshop carries XMP in an APP1 of its own, ahead of the EXIF one.
+  const file = jpeg(jfifApp0, xmpApp1, exifApp1(tiffBlock({ exif: { [ORIGINAL]: '2026:07:09 04:56:00' } })));
+  assert.deepEqual(exifDateTime(file), SOURCE_FIRST_FRAME);
+});
+
+test('other tags are walked past, and only a date can come back', () => {
+  // A phone writes dozens of tags, GPS among them. Nothing but the stamp is parsed — and the
+  // OffsetTimeOriginal here is ignored on purpose: 04:56 is what the camera showed, so 04:56 local
+  // is what the caption says, wherever the collage is being made.
+  const file = shot({
+    ifd0: { 0x010f: 'Apple', 0x0110: 'iPhone 15 Pro', 0x8825: 0x1000 }, // Make, Model, GPS pointer
+    exif: { [ORIGINAL]: '2026:07:09 04:56:00', 0x9011: '+09:00', 0x9291: '742' },
+  });
+  assert.deepEqual(exifDateTime(file), SOURCE_FIRST_FRAME);
+});
+
+test('nothing to read means null, never a throw', () => {
+  const cases = {
+    'no EXIF segment': jpeg(jfifApp0),
+    'EXIF carrying no date tag': shot({ exif: {} }),
+    'HEIC — EXIF lives in an ISOBMFF item, out of scope': new Uint8Array(
+      [0, 0, 0, 0x18, ...chars('ftypheic'), 0, 0, 0, 0, ...chars('heicmif1')],
+    ),
+    PNG: new Uint8Array([0x89, ...chars('PNG'), 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d]),
+    empty: new Uint8Array(0),
+    'garbage behind the SOI': new Uint8Array([0xff, 0xd8, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]),
+    'not an image at all': new Uint8Array(chars('this file is a grocery list')),
+    'bogus byte order': jpeg(jfifApp0, exifApp1([0x58, 0x58, 0, 0x2a, 0, 0, 0, 8])),
+    'bogus TIFF magic': jpeg(jfifApp0, exifApp1([0x49, 0x49, 0x99, 0x99, 8, 0, 0, 0])),
+  };
+  for (const [what, bytes] of Object.entries(cases)) assert.equal(exifDateTime(bytes), null, what);
+});
+
+test('a truncated head falls through instead of throwing', () => {
+  // index.html hands over the first 128KB, so a small photo arrives whole and a big one does not.
+  // subarray keeps the original buffer behind it — a parser that ignored the view's length would
+  // read past the cut and pass this by accident.
+  const file = shot({ exif: { [ORIGINAL]: '2026:07:09 04:56:00' } });
+  for (let n = 0; n <= file.length; n++) {
+    const got = exifDateTime(file.subarray(0, n));
+    assert.ok(got === null || Number(got) === Number(SOURCE_FIRST_FRAME), `cut at ${n}: ${got}`);
+  }
+  assert.deepEqual(exifDateTime(file.subarray(0)), SOURCE_FIRST_FRAME, 'the whole head still reads');
+});
+
+test('a corrupted byte never throws and never invents a date', () => {
+  const file = shot({ exif: { [ORIGINAL]: '2026:07:09 04:56:00' } });
+  for (let i = 0; i < file.length; i++) {
+    for (const bit of [0x01, 0x80, 0xff]) {
+      const bad = Uint8Array.from(file);
+      bad[i] ^= bit;
+      const got = exifDateTime(bad);
+      assert.ok(got === null || (got instanceof Date && !Number.isNaN(Number(got))),
+        `byte ${i} ^ 0x${bit.toString(16)} gave ${got}`);
+    }
+  }
+});
+
+test('impossible and blank stamps fall back rather than inventing a date', () => {
+  for (const stamp of [
+    '0000:00:00 00:00:00', // how a blank field is conventionally written
+    '    :  :     :  :  ', // and how some writers blank it instead
+    '2026:02:31 10:00:00', // no such day
+    '2026:13:01 10:00:00', // no such month
+    '2026:07:09 25:00:00', // no such hour
+    '0050:07:09 10:00:00', // a bare 0-99 year would silently land in the 1900s
+    'Thu Jul  9 04:56:00', // not the EXIF format
+    '2026-07-09 04:56:00', // dashes: a writer that used ISO instead
+    '',
+  ]) {
+    assert.equal(exifDateTime(shot({ exif: { [ORIGINAL]: stamp } })), null, JSON.stringify(stamp));
+  }
+});
+
+test('an ArrayBuffer works as well as a view over one', () => {
+  const file = shot({ exif: { [ORIGINAL]: '2026:07:09 04:56:00' } });
+  assert.deepEqual(exifDateTime(file.buffer.slice(0, file.byteLength)), SOURCE_FIRST_FRAME);
 });
