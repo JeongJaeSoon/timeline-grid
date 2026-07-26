@@ -62,6 +62,18 @@ export function canvasSize(W) {
   return { w: Math.round(W), h: Math.round(W * SPEC.aspect) };
 }
 
+// Preview canvases stretch to their container (`width: 100%`), so the bitmap has to be the size
+// the screen actually shows — CSS px times devicePixelRatio. The old fixed 620px was being
+// magnified 3.10x on a HiDPI desktop (962 CSS px at the 1040px .wrap cap, DPR 2) and 2.07x in a
+// narrow window; measured on Chrome, and the CSS-only ratio of 1.03x is what hides it.
+// Capped at the export width: past that the preview costs more than the download it stands in
+// for, which only DPR 4+ could reach anyway. Floored at 320 — the narrowest phone viewport, so
+// the smallest width worth drawing — which is what a container measuring 0 (laid out while
+// hidden) falls back to instead of a 0x0 canvas.
+export function previewWidth(cssW, dpr = 1) {
+  return Math.min(Math.max(Math.round(cssW * dpr) || 0, 320), SPEC.ref);
+}
+
 export function cellRect(i, W) {
   const col = i % SPEC.cols;
   const row = Math.floor(i / SPEC.cols);
@@ -97,6 +109,10 @@ export function formatStamp(date, locale = 'en-US') {
 }
 
 // Fill the cell, preserving aspect ratio, cropping from the center (CSS object-fit: cover).
+// No imageSmoothingQuality here on purpose: rendering a 3024x4032 photo into a 962x645 preview
+// cell gave byte-identical output at 'low' and 'high' (max per-pixel difference 0 over 620k
+// pixels), and upscaling a 400x300 one differed by 0.013 per channel — Chrome's GPU canvas
+// ignores the hint on this path, so setting it would be a line that reads like it does something.
 export function drawCover(ctx, img, x, y, w, h) {
   const s = Math.max(w / img.width, h / img.height);
   const dw = img.width * s;

@@ -132,9 +132,8 @@
 </div>
 
 <script type="module">
-import { PER_PAGE, SPEC, FONTS, paginate, formatStamp, renderPage } from './timeline.js';
+import { PER_PAGE, SPEC, FONTS, paginate, formatStamp, renderPage, previewWidth } from './timeline.js';
 
-const PREVIEW_W = 620; // downscaled render for the screen
 const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
 
 const $ = (id) => document.getElementById(id);
@@ -301,12 +300,11 @@ function drawPages() {
   const { stack } = currentFont();
   const host = $('pages');
   host.textContent = '';
-  pages.forEach((page, i) => {
+  const canvases = pages.map((page, i) => {
     const box = document.createElement('div');
     box.className = 'page';
     const canvas = document.createElement('canvas');
     box.appendChild(canvas);
-    renderPage(canvas, page, PREVIEW_W, stack);
 
     const row = document.createElement('div');
     row.className = 'row';
@@ -317,7 +315,15 @@ function drawPages() {
     row.appendChild(btn);
     box.appendChild(row);
     host.appendChild(box);
+    return canvas;
   });
+  // Sized only once they are in the document: `width: 100%` gives a canvas its layout width from
+  // the container, which is why this reads right before any bitmap exists and why setting the
+  // bitmap below cannot feed back into it. Every page is the same width, so measure one.
+  if (canvases.length) {
+    const W = previewWidth(canvases[0].getBoundingClientRect().width, devicePixelRatio);
+    canvases.forEach((canvas, i) => renderPage(canvas, pages[i], W, stack));
+  }
   $('pagesEmpty').hidden = pages.length > 0;
   $('dlAll').disabled = pages.length === 0;
   // The pass above may have drawn in the fallback face; redraw once the real one lands.
@@ -361,6 +367,15 @@ $('clear').addEventListener('click', () => {
 $('dlAll').addEventListener('click', async () => {
   const pages = paginate(items.map(toRenderItem));
   for (let i = 0; i < pages.length; i++) await download(pages[i], i);
+});
+
+// The bitmap tracks the CSS width now, so a resize invalidates it. Dragging the window onto a
+// screen with a different devicePixelRatio fires resize as well, which is what keeps it sharp
+// there. Trailing-edge only — a redraw per frame of a drag would be pure waste.
+let resizeTimer;
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(drawPages, 150);
 });
 
 refresh(true); // drawPages starts the font load and redraws itself once it lands
