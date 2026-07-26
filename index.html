@@ -43,6 +43,7 @@
 
   .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
   .bar .grow { flex: 1; }
+  .bar select { max-width: 100%; }
   button, select {
     font: inherit; font-size: 14px; padding: 7px 14px; border: 1px solid var(--line);
     background: #fff; color: var(--ink); border-radius: 3px; cursor: pointer;
@@ -107,6 +108,7 @@
       <h2 style="margin:0 8px 0 0">사진</h2>
       <span class="count" id="count">0장</span>
       <span class="grow"></span>
+      <select id="font" title="캡션 폰트"></select>
       <select id="locale" title="캡션 날짜 표기">
         <option value="en-US">English — 04:56, Thursday, July 09</option>
         <option value="ko-KR">한국어 — 04:56, 목요일, 7월 09일</option>
@@ -130,7 +132,7 @@
 </div>
 
 <script type="module">
-import { PER_PAGE, SPEC, paginate, formatStamp, renderPage } from './timeline.js';
+import { PER_PAGE, SPEC, FONTS, paginate, formatStamp, renderPage } from './timeline.js';
 
 const PREVIEW_W = 620; // downscaled render for the screen
 const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
@@ -218,6 +220,60 @@ function move(item, delta) {
   refresh(true);
 }
 
+/* ---------- caption font ---------- */
+
+// Grouped so it is obvious which faces carry Hangul: the Latin-only ones leave Korean captions
+// to whatever serif the system substitutes.
+for (const [label, hangul] of [['라틴 전용', false], ['한글 지원', true]]) {
+  const group = document.createElement('optgroup');
+  group.label = label;
+  for (const f of FONTS.filter((x) => x.hangul === hangul)) {
+    group.appendChild(Object.assign(document.createElement('option'), {
+      value: f.family,
+      textContent: f.label,
+    }));
+  }
+  $('font').appendChild(group);
+}
+
+const currentFont = () => FONTS.find((f) => f.family === $('font').value) ?? FONTS[0];
+
+// Linked on pick rather than upfront — the four Hangul families are 58-98KB of CSS each,
+// which is more than the rest of this app put together.
+function stylesheet(font) {
+  if (!font.css) return Promise.resolve();
+  let link = document.querySelector(`link[href="${font.css}"]`);
+  if (!link) {
+    link = Object.assign(document.createElement('link'), { rel: 'stylesheet', href: font.css });
+    link.ready = new Promise((done) => { link.onload = link.onerror = done; });
+    document.head.appendChild(link);
+  }
+  return link.ready;
+}
+
+// Canvas has no per-glyph fallback the way CSS does, so the face must be in before fillText.
+// fonts.load only fetches the unicode-range subsets covering the text handed to it, and Google
+// splits Hangul across ~100 of them — omit the text and Korean glyphs never arrive.
+async function loadFont(text) {
+  const font = currentFont();
+  await stylesheet(font);
+  await document.fonts.load(`16px "${font.family}"`, text || 'A').catch(() => {});
+  return font;
+}
+
+// fonts.check() is no use as the gate: it reports whether anything matching is still loading,
+// so it answers true even for a family whose stylesheet has not been injected yet — checked in
+// Chrome, where it is true for a made-up family name. Track what was already requested instead.
+// That also bounds the redraw when a face simply has no glyph for the text (Tinos and Hangul),
+// which fonts.load() resolves for without ever making it renderable.
+let asked = '';
+function ensureFont(text) {
+  const key = `${$('font').value}\n${text}`;
+  if (asked === key) return;
+  asked = key;
+  loadFont(text).then(() => drawPages());
+}
+
 /* ---------- rendering ---------- */
 
 const toRenderItem = (it) => ({
@@ -237,8 +293,12 @@ function refresh(relayout = false) {
   drawPages();
 }
 
+const captionText = (page) => page.map((p) => `${p.stamp}${p.note}`).join('');
+
 function drawPages() {
-  const pages = paginate(items.map(toRenderItem));
+  const rendered = items.map(toRenderItem);
+  const pages = paginate(rendered);
+  const { stack } = currentFont();
   const host = $('pages');
   host.textContent = '';
   pages.forEach((page, i) => {
@@ -246,7 +306,7 @@ function drawPages() {
     box.className = 'page';
     const canvas = document.createElement('canvas');
     box.appendChild(canvas);
-    renderPage(canvas, page, PREVIEW_W);
+    renderPage(canvas, page, PREVIEW_W, stack);
 
     const row = document.createElement('div');
     row.className = 'row';
@@ -260,11 +320,14 @@ function drawPages() {
   });
   $('pagesEmpty').hidden = pages.length > 0;
   $('dlAll').disabled = pages.length === 0;
+  // The pass above may have drawn in the fallback face; redraw once the real one lands.
+  ensureFont(captionText(rendered));
 }
 
 async function download(page, i) {
+  const { stack } = await loadFont(captionText(page)); // never export in the fallback face
   const canvas = document.createElement('canvas');
-  renderPage(canvas, page, EXPORT_W);
+  renderPage(canvas, page, EXPORT_W, stack);
   const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -286,6 +349,7 @@ for (const type of ['dragleave', 'drop']) {
 }
 $('drop').addEventListener('drop', (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
 
+$('font').addEventListener('change', () => refresh());
 $('locale').addEventListener('change', () => refresh());
 $('sort').addEventListener('click', () => { items.sort((a, b) => a.dt - b.dt); refresh(true); });
 $('clear').addEventListener('click', () => {
@@ -299,9 +363,7 @@ $('dlAll').addEventListener('click', async () => {
   for (let i = 0; i < pages.length; i++) await download(pages[i], i);
 });
 
-// Drawing before the webfont is ready would render the first captions in the fallback face.
-document.fonts.load(`${SPEC.fontSize * PREVIEW_W}px "Tinos"`).then(() => refresh());
-refresh(true);
+refresh(true); // drawPages starts the font load and redraws itself once it lands
 </script>
 </body>
 </html>
