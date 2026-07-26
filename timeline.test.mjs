@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SPEC, FONTS, CAPTION_FONT, canvasSize, cellRect, paginate, formatStamp,
-  measureCaptionFont, drawCaption,
+  measureCaptionFont, drawCaption, previewWidth,
 } from './timeline.js';
 
 const W = SPEC.ref; // 3077 — the width the source was measured at
@@ -32,6 +32,20 @@ const TINOS = measureCaptionFont(fakeCtx(473, 0.694, 0.217), CAPTION_FONT);
 
 test('canvas matches the source dimensions', () => {
   assert.deepEqual(canvasSize(W), { w: 3077, h: 4096 });
+});
+
+// The preview canvas is stretched to its container by CSS, so its bitmap has to be the device
+// pixels it lands on. The CSS widths below were measured in Chrome: 962 at the 1040px .wrap cap,
+// 622 in a 700px window, 313 on a 375px phone.
+test('preview bitmaps come out at one device pixel each', () => {
+  assert.equal(previewWidth(962, 2), 1924);
+  assert.equal(previewWidth(622, 2), 1244);
+  assert.equal(previewWidth(313, 3), 939);
+  assert.equal(previewWidth(962), 962, 'no ratio given means CSS pixels');
+  // Never bigger than the export it stands in for, never zero for a container that measures none.
+  assert.equal(previewWidth(962, 4), SPEC.ref);
+  assert.equal(previewWidth(0, 2), 320);
+  assert.equal(previewWidth(NaN, 2), 320);
 });
 
 test('photo cells reproduce the measured grid', () => {
