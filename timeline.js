@@ -62,6 +62,19 @@ export function canvasSize(W) {
   return { w: Math.round(W), h: Math.round(W * SPEC.aspect) };
 }
 
+// Preview canvases stretch to their container (`width: 100%`), so the bitmap has to be the size
+// the screen actually shows — CSS px times devicePixelRatio. The old fixed 620px was being
+// magnified 3.10x on a HiDPI desktop (962 CSS px at the 1040px .wrap cap, DPR 2). A 700px window
+// is the case that hid it: 622 CSS px against a 620px bitmap reads as a 1.00x match until DPR
+// goes into the arithmetic, and then it is 2.01x. Measured on Chrome.
+// Capped at the export width. The container never exceeds 962 CSS px, so the cap first bites at
+// devicePixelRatio 3.2 — past that the preview would cost more than the download it stands in
+// for. Floored at 320, the narrowest phone viewport and so the smallest width worth drawing,
+// which is what a container measuring 0 (laid out while hidden) gets instead of a 0x0 canvas.
+export function previewWidth(cssW, dpr = 1) {
+  return Math.min(Math.max(Math.round(cssW * dpr) || 0, 320), SPEC.ref);
+}
+
 export function cellRect(i, W) {
   const col = i % SPEC.cols;
   const row = Math.floor(i / SPEC.cols);
@@ -220,6 +233,10 @@ export function exifDateTime(bytes) {
 }
 
 // Fill the cell, preserving aspect ratio, cropping from the center (CSS object-fit: cover).
+// No imageSmoothingQuality here on purpose: rendering a 3024x4032 photo into a 962x645 preview
+// cell gave byte-identical output at 'low' and 'high' (max per-pixel difference 0 over 620k
+// pixels), and upscaling a 400x300 one differed by 0.013 per channel — Chrome's GPU canvas
+// ignores the hint on this path, so setting it would be a line that reads like it does something.
 export function drawCover(ctx, img, x, y, w, h) {
   const s = Math.max(w / img.width, h / img.height);
   const dw = img.width * s;
