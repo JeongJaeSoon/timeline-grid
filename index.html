@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timeline Grid — 사진 타임라인 콜라주</title>
+<meta name="description" content="사진을 올리고 시간과 문구만 적으면 타임라인 콜라주를 만들어 줍니다. 사진은 브라우저 밖으로 나가지 않습니다.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tinos:ital,wght@0,400;0,700;1,400&display=swap">
+<style>
+  :root {
+    --ink: #14140f;
+    --muted: #6f6f66;
+    --line: #e3e2dc;
+    --bg: #faf9f5;
+    --accent: #14140f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font: 400 40px/1.1 "Tinos", "Times New Roman", serif; margin: 0 0 8px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 36px; max-width: 56ch; }
+  .sub a { color: var(--muted); }
+
+  section { margin-bottom: 36px; }
+  h2 { font: 400 13px/1 -apple-system, sans-serif; letter-spacing: .14em; text-transform: uppercase;
+       color: var(--muted); margin: 0 0 14px; }
+
+  #drop {
+    border: 1px dashed var(--line); border-radius: 4px; background: #fff;
+    padding: 44px 24px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  #drop:hover, #drop.over { border-color: var(--ink); background: #fff; }
+  #drop strong { display: block; font: 400 20px/1.3 "Tinos", serif; margin-bottom: 4px; }
+  #drop span { color: var(--muted); font-size: 14px; }
+  #file { display: none; }
+
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+  .bar .grow { flex: 1; }
+  button, select {
+    font: inherit; font-size: 14px; padding: 7px 14px; border: 1px solid var(--line);
+    background: #fff; color: var(--ink); border-radius: 3px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--ink); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .count { color: var(--muted); font-size: 14px; }
+
+  #list { display: grid; gap: 10px; }
+  .card {
+    display: grid; grid-template-columns: 78px 1fr auto; gap: 14px; align-items: center;
+    background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 10px;
+  }
+  .card img { width: 78px; height: 52px; object-fit: cover; border-radius: 2px; display: block; background: #eee; }
+  .fields { display: grid; grid-template-columns: minmax(180px, 210px) 1fr; gap: 8px; }
+  .fields input {
+    font: inherit; font-size: 14px; padding: 6px 9px; border: 1px solid var(--line);
+    border-radius: 3px; background: #fff; color: var(--ink); width: 100%; min-width: 0;
+  }
+  .fields input:focus { outline: none; border-color: var(--ink); }
+  .ops { display: flex; gap: 4px; }
+  .ops button { padding: 5px 9px; line-height: 1; }
+  .idx { position: absolute; }
+
+  #pages { display: grid; gap: 28px; }
+  .page { background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 14px; }
+  .page canvas { width: 100%; height: auto; display: block; }
+  .page .row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .page .row span { color: var(--muted); font-size: 13px; flex: 1; }
+
+  .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
+  @media (max-width: 640px) {
+    .wrap { padding: 32px 16px 72px; }
+    h1 { font-size: 32px; }
+    .card { grid-template-columns: 62px 1fr; }
+    .card img { width: 62px; height: 44px; }
+    .fields { grid-template-columns: 1fr; }
+    .ops { grid-column: 1 / -1; justify-content: flex-end; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Timeline Grid</h1>
+  <p class="sub">
+    사진을 여러 장 올리고 사진마다 시각과 문구를 적으면, 하루의 흐름을 담은 타임라인 콜라주를 만들어 줍니다.
+    3&times;2 여섯 컷이 한 장이고, 넘치면 자동으로 다음 장으로 넘어갑니다.
+    모든 처리는 브라우저 안에서 끝나며 사진은 어디로도 전송되지 않습니다.
+  </p>
+
+  <section>
+    <div id="drop">
+      <input type="file" id="file" accept="image/*" multiple>
+      <strong>사진 고르기</strong>
+      <span>여기로 끌어다 놓거나 눌러서 선택하세요</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="bar">
+      <h2 style="margin:0 8px 0 0">사진</h2>
+      <span class="count" id="count">0장</span>
+      <span class="grow"></span>
+      <select id="locale" title="캡션 날짜 표기">
+        <option value="en-US">English — 04:56, Thursday, July 09</option>
+        <option value="ko-KR">한국어 — 04:56, 목요일, 7월 09일</option>
+      </select>
+      <button id="sort">시간순 정렬</button>
+      <button id="clear">전체 지우기</button>
+    </div>
+    <div id="list"></div>
+    <p class="empty" id="listEmpty">아직 사진이 없습니다.</p>
+  </section>
+
+  <section>
+    <div class="bar">
+      <h2 style="margin:0 8px 0 0">미리보기</h2>
+      <span class="grow"></span>
+      <button id="dlAll" class="primary" disabled>전체 내려받기</button>
+    </div>
+    <div id="pages"></div>
+    <p class="empty" id="pagesEmpty">사진을 올리면 결과가 여기에 나타납니다.</p>
+  </section>
+</div>
+
+<script type="module">
+import { PER_PAGE, SPEC, paginate, formatStamp, renderPage } from './timeline.js';
+
+const PREVIEW_W = 620; // downscaled render for the screen
+const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
+
+const $ = (id) => document.getElementById(id);
+const items = [];
+let seq = 0;
+
+/* ---------- reading files ---------- */
+
+// createImageBitmap can honour EXIF orientation, which keeps portrait phone shots upright.
+async function decode(file) {
+  try {
+    return await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    // The object URL has to outlive this call — the image is drawn later, and revoking
+    // here would blank it. The browser reclaims it when the tab closes.
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await img.decode();
+    return img;
+  }
+}
+
+async function addFiles(fileList) {
+  const files = [...fileList].filter((f) => f.type.startsWith('image/'));
+  for (const file of files) {
+    const img = await decode(file);
+    items.push({
+      id: ++seq,
+      img,
+      thumb: URL.createObjectURL(file),
+      dt: new Date(file.lastModified),
+      note: '',
+      el: null,
+    });
+  }
+  if (files.length) refresh(true);
+}
+
+/* ---------- cards ---------- */
+
+const pad = (n) => String(n).padStart(2, '0');
+const toInputValue = (d) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+function buildCard(item) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <img alt="">
+    <div class="fields">
+      <input type="datetime-local" class="dt">
+      <input type="text" class="note" placeholder="장소나 한마디 (선택) — 캡션 둘째 줄">
+    </div>
+    <div class="ops">
+      <button class="up" title="위로">↑</button>
+      <button class="down" title="아래로">↓</button>
+      <button class="del" title="삭제">✕</button>
+    </div>`;
+  el.querySelector('img').src = item.thumb;
+  const dt = el.querySelector('.dt');
+  const note = el.querySelector('.note');
+  dt.value = toInputValue(item.dt);
+  dt.addEventListener('input', () => {
+    if (dt.value) { item.dt = new Date(dt.value); refresh(); }
+  });
+  note.addEventListener('input', () => { item.note = note.value.trim(); refresh(); });
+  el.querySelector('.up').addEventListener('click', () => move(item, -1));
+  el.querySelector('.down').addEventListener('click', () => move(item, 1));
+  el.querySelector('.del').addEventListener('click', () => {
+    items.splice(items.indexOf(item), 1);
+    URL.revokeObjectURL(item.thumb);
+    refresh(true);
+  });
+  item.el = el;
+  return el;
+}
+
+function move(item, delta) {
+  const i = items.indexOf(item);
+  const j = i + delta;
+  if (j < 0 || j >= items.length) return;
+  [items[i], items[j]] = [items[j], items[i]];
+  refresh(true);
+}
+
+/* ---------- rendering ---------- */
+
+const toRenderItem = (it) => ({
+  img: it.img,
+  stamp: formatStamp(it.dt, $('locale').value),
+  note: it.note,
+});
+
+// Only re-place the card DOM when relayout=true — typing must not lose focus.
+function refresh(relayout = false) {
+  if (relayout) {
+    const list = $('list');
+    for (const it of items) list.appendChild(it.el ?? buildCard(it));
+    $('count').textContent = `${items.length}장`;
+    $('listEmpty').hidden = items.length > 0;
+  }
+  drawPages();
+}
+
+function drawPages() {
+  const pages = paginate(items.map(toRenderItem));
+  const host = $('pages');
+  host.textContent = '';
+  pages.forEach((page, i) => {
+    const box = document.createElement('div');
+    box.className = 'page';
+    const canvas = document.createElement('canvas');
+    box.appendChild(canvas);
+    renderPage(canvas, page, PREVIEW_W);
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<span>${i + 1}번째 장 · ${page.length}컷</span>`;
+    const btn = document.createElement('button');
+    btn.textContent = '이 장 내려받기';
+    btn.addEventListener('click', () => download(page, i));
+    row.appendChild(btn);
+    box.appendChild(row);
+    host.appendChild(box);
+  });
+  $('pagesEmpty').hidden = pages.length > 0;
+  $('dlAll').disabled = pages.length === 0;
+}
+
+async function download(page, i) {
+  const canvas = document.createElement('canvas');
+  renderPage(canvas, page, EXPORT_W);
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `timeline-${String(i + 1).padStart(2, '0')}.png`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ---------- events ---------- */
+
+$('drop').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
+for (const type of ['dragenter', 'dragover']) {
+  $('drop').addEventListener(type, (e) => { e.preventDefault(); $('drop').classList.add('over'); });
+}
+for (const type of ['dragleave', 'drop']) {
+  $('drop').addEventListener(type, () => $('drop').classList.remove('over'));
+}
+$('drop').addEventListener('drop', (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
+
+$('locale').addEventListener('change', () => refresh());
+$('sort').addEventListener('click', () => { items.sort((a, b) => a.dt - b.dt); refresh(true); });
+$('clear').addEventListener('click', () => {
+  for (const it of items) URL.revokeObjectURL(it.thumb);
+  items.length = 0;
+  $('list').textContent = '';
+  refresh(true);
+});
+$('dlAll').addEventListener('click', async () => {
+  const pages = paginate(items.map(toRenderItem));
+  for (let i = 0; i < pages.length; i++) await download(pages[i], i);
+});
+
+// Drawing before the webfont is ready would render the first captions in the fallback face.
+document.fonts.load(`${SPEC.fontSize * PREVIEW_W}px "Tinos"`).then(() => refresh());
+refresh(true);
+</script>
+</body>
+</html>
