@@ -163,6 +163,8 @@ test('timestamp formatting', () => {
 // truncated head, a missing tag — are the ones no camera on hand produces.
 
 const be16 = (n) => [(n >> 8) & 255, n & 255];
+const le16 = (n) => [n & 255, (n >> 8) & 255];
+const le32 = (n) => [n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >>> 24) & 255];
 const chars = (s) => [...s].map((c) => c.charCodeAt(0));
 
 // A JPEG segment: 0xFF, marker, then a big-endian length that counts its own two bytes.
@@ -309,6 +311,26 @@ test('impossible and blank stamps fall back rather than inventing a date', () =>
   ]) {
     assert.equal(exifDateTime(shot({ exif: { [ORIGINAL]: stamp } })), null, JSON.stringify(stamp));
   }
+});
+
+test('a value offset pointing past the APP1 segment reads nothing', () => {
+  // Nothing stops a malformed IFD pointing its value offset outside its own segment. The bytes it
+  // reaches here are a perfectly good date sitting in the comment segment that follows — they must
+  // not become a capture time, because they have nothing to do with this photo.
+  const date = [...chars('2026:07:09 04:56:00'), 0];
+  // IFD0 at 8 with one ASCII entry whose value lives 30 bytes past the TIFF header. The APP1
+  // length below covers the header and IFD0 and stops there, so offset 30 is outside the segment.
+  const tiff = [
+    0x49, 0x49, 0x2a, 0x00, ...le32(8),
+    ...le16(1), ...le16(IFD0_DATE), ...le16(2), ...le32(date.length), ...le32(30), ...le32(0),
+  ];
+  const app1 = [0xff, 0xe1, ...be16(6 + tiff.length + 2), ...chars('Exif'), 0, 0, ...tiff];
+  const file = new Uint8Array([0xff, 0xd8, ...app1, ...segment(0xfe, date), 0xff, 0xd9]);
+  // The TIFF header starts at 12, so the string really is 30 bytes past it — the parse has to be
+  // what declines to follow the offset, not the absence of anything to find.
+  const base = 12;
+  assert.equal(String.fromCharCode(...file.subarray(base + 30, base + 49)), '2026:07:09 04:56:00');
+  assert.equal(exifDateTime(file), null);
 });
 
 test('an ArrayBuffer works as well as a view over one', () => {

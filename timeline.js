@@ -122,39 +122,46 @@ const TAG_EXIF_IFD = 0x8769; // IFD0: offset of the ExifIFD
 const TAG_ORIGINAL = 0x9003; // ExifIFD: when the shutter fired
 const TAG_DIGITIZED = 0x9004; // ExifIFD: when it was recorded — same as above on a camera
 
-// Offset of the TIFF header in the first APP1 EXIF segment, or -1. Walking the marker chain rather
-// than searching for "Exif\0\0" is what stops the same six bytes inside the pixel data counting.
-function exifTiffAt(v) {
-  if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return -1; // no SOI: not a JPEG
+// The TIFF block of the first APP1 EXIF segment, as a view bounded by that segment — or null.
+// Bounding it there is what keeps the block honest: an IFD is free to point a value offset
+// anywhere, and against a view of the whole file a malformed one can reach into the segments that
+// follow and pass their bytes off as a capture time. Against this view the same offset simply
+// throws. Walking the marker chain rather than searching for "Exif\0\0" is the other half of that
+// — the same six bytes occur inside pixel data often enough.
+function exifTiff(v) {
+  if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return null; // no SOI: not a JPEG
   let p = 2;
   while (p + 4 <= v.byteLength) {
-    if (v.getUint8(p) !== 0xff) return -1; // lost the chain
+    if (v.getUint8(p) !== 0xff) return null; // lost the chain
     const marker = v.getUint8(p + 1);
     if (marker === 0xff) { p += 1; continue; } // fill byte ahead of the real marker
     if (marker === 0x01 || marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) { p += 2; continue; }
-    if (marker === 0xda || marker === 0xd9) return -1; // pixel data starts here; the headers are behind us
+    if (marker === 0xda || marker === 0xd9) return null; // pixel data starts here; the headers are behind us
     const len = v.getUint16(p + 2);
-    if (len < 2) return -1; // the length counts itself, so anything under 2 is nonsense
+    if (len < 2) return null; // the length counts itself, so anything under 2 is nonsense
     const id = p + 4;
-    if (marker === 0xe1 && EXIF_ID.every((b, i) => id + i < v.byteLength && v.getUint8(id + i) === b)) {
-      return id + EXIF_ID.length;
+    const end = Math.min(p + 2 + len, v.byteLength); // a cut-short head ends the block early
+    if (marker === 0xe1 && id + EXIF_ID.length <= end && EXIF_ID.every((b, i) => v.getUint8(id + i) === b)) {
+      const at = id + EXIF_ID.length;
+      return at < end ? new DataView(v.buffer, v.byteOffset + at, end - at) : null;
     }
     p += 2 + len; // some other segment — XMP and ICC also live in APP1/APP2
   }
-  return -1;
+  return null;
 }
 
-// The value of one tag in the IFD at `ifd`. Values of four bytes or fewer sit in the entry itself;
-// anything longer is stored elsewhere in the block and the entry holds its offset.
-function tagValue(v, base, ifd, le, tag) {
-  const n = v.getUint16(base + ifd, le);
+// The value of one tag in the IFD at `ifd`. Offsets are relative to the start of the TIFF block,
+// which is where `t` begins. Values of four bytes or fewer sit in the entry itself; anything longer
+// is stored elsewhere in the block and the entry holds its offset.
+function tagValue(t, ifd, le, tag) {
+  const n = t.getUint16(ifd, le);
   for (let i = 0; i < n; i++) {
-    const e = base + ifd + 2 + i * 12; // count, then 12 bytes per entry: tag, type, count, value
-    if (v.getUint16(e, le) !== tag) continue;
-    const type = v.getUint16(e + 2, le);
-    const count = v.getUint32(e + 4, le);
+    const e = ifd + 2 + i * 12; // count, then 12 bytes per entry: tag, type, count, value
+    if (t.getUint16(e, le) !== tag) continue;
+    const type = t.getUint16(e + 2, le);
+    const count = t.getUint32(e + 4, le);
     const size = count * (type === ASCII ? 1 : 4); // only ASCII strings and LONG offsets are asked for
-    return { type, count, at: size <= 4 ? e + 8 : base + v.getUint32(e + 8, le) };
+    return { type, count, at: size <= 4 ? e + 8 : t.getUint32(e + 8, le) };
   }
   return null;
 }
@@ -174,12 +181,12 @@ function stampToDate(s) {
   return date.getFullYear() === y && date.getMonth() === mo - 1 && date.getDate() === d ? date : null;
 }
 
-function dateTag(v, base, ifd, le, tag) {
-  const f = tagValue(v, base, ifd, le, tag);
+function dateTag(t, ifd, le, tag) {
+  const f = tagValue(t, ifd, le, tag);
   if (!f || f.type !== ASCII) return null;
   let s = '';
   for (let i = 0; i < f.count; i++) {
-    const c = v.getUint8(f.at + i);
+    const c = t.getUint8(f.at + i);
     if (c === 0) break; // count includes the terminating NUL
     s += String.fromCharCode(c);
   }
@@ -193,20 +200,20 @@ export function exifDateTime(bytes) {
     const v = ArrayBuffer.isView(bytes)
       ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
       : new DataView(bytes);
-    const base = exifTiffAt(v);
-    if (base < 0) return null;
-    const order = v.getUint16(base);
+    const t = exifTiff(v);
+    if (!t) return null;
+    const order = t.getUint16(0);
     if (order !== 0x4949 && order !== 0x4d4d) return null; // "II" little-endian / "MM" big-endian
     const le = order === 0x4949;
-    if (v.getUint16(base + 2, le) !== 0x2a) return null; // TIFF's 42, which also proves the order read
-    const ifd0 = v.getUint32(base + 4, le);
-    const ptr = tagValue(v, base, ifd0, le, TAG_EXIF_IFD);
+    if (t.getUint16(2, le) !== 0x2a) return null; // TIFF's 42, which also proves the order read
+    const ifd0 = t.getUint32(4, le);
+    const ptr = tagValue(t, ifd0, le, TAG_EXIF_IFD);
     const inExif = (tag) =>
-      ptr && ptr.type === LONG ? dateTag(v, base, v.getUint32(ptr.at, le), le, tag) : null;
+      ptr && ptr.type === LONG ? dateTag(t, t.getUint32(ptr.at, le), le, tag) : null;
     // Shutter time first. Digitized matches it on a camera and is what a scan carries instead.
     // IFD0's DateTime comes last: it is an edit time, but it still travels with the pixels, which
     // is more than the mtime the caller falls back to can claim.
-    return inExif(TAG_ORIGINAL) ?? inExif(TAG_DIGITIZED) ?? dateTag(v, base, ifd0, le, TAG_DATE_TIME);
+    return inExif(TAG_ORIGINAL) ?? inExif(TAG_DIGITIZED) ?? dateTag(t, ifd0, le, TAG_DATE_TIME);
   } catch {
     return null; // truncated head or offsets pointing off the end — the caller falls back to the mtime
   }
