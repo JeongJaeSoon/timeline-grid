@@ -64,12 +64,13 @@ export function canvasSize(W) {
 
 // Preview canvases stretch to their container (`width: 100%`), so the bitmap has to be the size
 // the screen actually shows — CSS px times devicePixelRatio. The old fixed 620px was being
-// magnified 3.10x on a HiDPI desktop (962 CSS px at the 1040px .wrap cap, DPR 2) and 2.07x in a
-// narrow window; measured on Chrome, and the CSS-only ratio of 1.03x is what hides it.
-// Capped at the export width: past that the preview costs more than the download it stands in
-// for, which only DPR 4+ could reach anyway. Floored at 320 — the narrowest phone viewport, so
-// the smallest width worth drawing — which is what a container measuring 0 (laid out while
-// hidden) falls back to instead of a 0x0 canvas.
+// magnified 3.10x on a HiDPI desktop (962 CSS px at the 1040px .wrap cap, DPR 2). A 700px window
+// is the case that hid it: 622 CSS px against a 620px bitmap reads as a 1.00x match until DPR
+// goes into the arithmetic, and then it is 2.01x. Measured on Chrome.
+// Capped at the export width. The container never exceeds 962 CSS px, so the cap first bites at
+// devicePixelRatio 3.2 — past that the preview would cost more than the download it stands in
+// for. Floored at 320, the narrowest phone viewport and so the smallest width worth drawing,
+// which is what a container measuring 0 (laid out while hidden) gets instead of a 0x0 canvas.
 export function previewWidth(cssW, dpr = 1) {
   return Math.min(Math.max(Math.round(cssW * dpr) || 0, 320), SPEC.ref);
 }
