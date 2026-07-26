@@ -103,9 +103,9 @@ export function formatStamp(date, locale = 'en-US') {
 // TIFF block hidden inside a JPEG's APP1 segment: byte order, magic 42, IFD0's offset, then IFD0,
 // with an ExifIFD hanging off tag 0x8769. Every offset inside is relative to that block's start.
 //
-// Only the four date tags below are ever looked at. EXIF also carries GPS, and this app promises
-// the photo does not leave the browser, so nothing else is parsed and a Date is all that can
-// come back out.
+// Only the three date tags below are ever read, plus the pointer that leads to them. EXIF also
+// carries GPS, and this app promises the photo does not leave the browser, so nothing else is
+// parsed and a Date is all that can come back out.
 //
 // The stamp is read as a local wall clock. DateTimeOriginal has no timezone, and the newer
 // OffsetTimeOriginal (0x9011) is ignored on purpose: honouring it would shift a photo taken at
@@ -164,11 +164,13 @@ function stampToDate(s) {
   const m = /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(s);
   if (!m) return null;
   const [y, mo, d, h, min, sec] = m.slice(1).map(Number);
+  // Month and day of zero are how a blank field gets written — "0000:00:00 00:00:00" is thrown out
+  // right here, before any of it reaches Date.
   if (mo < 1 || mo > 12 || d < 1 || h > 23 || min > 59 || sec > 60) return null;
   const date = new Date(y, mo - 1, d, h, min, sec);
-  // The date has to survive the round trip. That rejects the "0000:00:00 00:00:00" a blank field is
-  // written as (a bare year under 100 would silently land in the 1900s) and impossible days like
-  // 02:31. The clock is left to normalise, so a stamp inside a DST gap shifts rather than being lost.
+  // The date then has to survive the round trip, which catches what a range check cannot: a bare
+  // year under 100 lands silently in the 1900s, and 02:31 rolls forward into March. Only the date
+  // is checked, so a stamp inside a DST gap normalises rather than being thrown away.
   return date.getFullYear() === y && date.getMonth() === mo - 1 && date.getDate() === d ? date : null;
 }
 
