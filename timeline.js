@@ -109,6 +109,129 @@ export function formatStamp(date, locale = 'en-US') {
   return `${hh}:${mm}, ${parts.weekday}, ${day}`;
 }
 
+/* ---------- EXIF capture time ---------- */
+
+// A file's mtime is when it was copied, not when the shutter fired — AirDropped and downloaded
+// photos all carry the moment they landed on the machine. The real time is in EXIF, which is a
+// TIFF block hidden inside a JPEG's APP1 segment: byte order, magic 42, IFD0's offset, then IFD0,
+// with an ExifIFD hanging off tag 0x8769. Every offset inside is relative to that block's start.
+//
+// Only the three date tags below are ever read, plus the pointer that leads to them. EXIF also
+// carries GPS, and this app promises the photo does not leave the browser, so nothing else is
+// parsed and a Date is all that can come back out.
+//
+// The stamp is read as a local wall clock. DateTimeOriginal has no timezone, and the newer
+// OffsetTimeOriginal (0x9011) is ignored on purpose: honouring it would shift a photo taken at
+// 04:56 in Tokyo to whatever that instant is called wherever the collage is being made, printing
+// a time the camera never showed. formatStamp() and the datetime-local input are both local too.
+//
+// JPEG only. HEIC/HEIF — the iPhone default — keeps EXIF in an ISOBMFF item, an unrelated
+// container, and PNG has no capture time worth chasing; both fall out as null.
+const ASCII = 2;
+const LONG = 4;
+const EXIF_ID = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00]; // "Exif\0\0", what marks an APP1 as EXIF
+const TAG_DATE_TIME = 0x0132; // IFD0: the file's own stamp, set by the camera or by an editor
+const TAG_EXIF_IFD = 0x8769; // IFD0: offset of the ExifIFD
+const TAG_ORIGINAL = 0x9003; // ExifIFD: when the shutter fired
+const TAG_DIGITIZED = 0x9004; // ExifIFD: when it was recorded — same as above on a camera
+
+// The TIFF block of the first APP1 EXIF segment, as a view bounded by that segment — or null.
+// Bounding it there is what keeps the block honest: an IFD is free to point a value offset
+// anywhere, and against a view of the whole file a malformed one can reach into the segments that
+// follow and pass their bytes off as a capture time. Against this view the same offset simply
+// throws. Walking the marker chain rather than searching for "Exif\0\0" is the other half of that
+// — the same six bytes occur inside pixel data often enough.
+function exifTiff(v) {
+  if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return null; // no SOI: not a JPEG
+  let p = 2;
+  while (p + 4 <= v.byteLength) {
+    if (v.getUint8(p) !== 0xff) return null; // lost the chain
+    const marker = v.getUint8(p + 1);
+    if (marker === 0xff) { p += 1; continue; } // fill byte ahead of the real marker
+    if (marker === 0x01 || marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) { p += 2; continue; }
+    if (marker === 0xda || marker === 0xd9) return null; // pixel data starts here; the headers are behind us
+    const len = v.getUint16(p + 2);
+    if (len < 2) return null; // the length counts itself, so anything under 2 is nonsense
+    const id = p + 4;
+    const end = Math.min(p + 2 + len, v.byteLength); // a cut-short head ends the block early
+    if (marker === 0xe1 && id + EXIF_ID.length <= end && EXIF_ID.every((b, i) => v.getUint8(id + i) === b)) {
+      const at = id + EXIF_ID.length;
+      return at < end ? new DataView(v.buffer, v.byteOffset + at, end - at) : null;
+    }
+    p += 2 + len; // some other segment — XMP and ICC also live in APP1/APP2
+  }
+  return null;
+}
+
+// The value of one tag in the IFD at `ifd`. Offsets are relative to the start of the TIFF block,
+// which is where `t` begins. Values of four bytes or fewer sit in the entry itself; anything longer
+// is stored elsewhere in the block and the entry holds its offset.
+function tagValue(t, ifd, le, tag) {
+  const n = t.getUint16(ifd, le);
+  for (let i = 0; i < n; i++) {
+    const e = ifd + 2 + i * 12; // count, then 12 bytes per entry: tag, type, count, value
+    if (t.getUint16(e, le) !== tag) continue;
+    const type = t.getUint16(e + 2, le);
+    const count = t.getUint32(e + 4, le);
+    const size = count * (type === ASCII ? 1 : 4); // only ASCII strings and LONG offsets are asked for
+    return { type, count, at: size <= 4 ? e + 8 : t.getUint32(e + 8, le) };
+  }
+  return null;
+}
+
+// "2026:07:09 04:56:00" — colon-separated, which is why new Date(string) cannot read it.
+function stampToDate(s) {
+  const m = /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(s);
+  if (!m) return null;
+  const [y, mo, d, h, min, sec] = m.slice(1).map(Number);
+  // Month and day of zero are how a blank field gets written — "0000:00:00 00:00:00" is thrown out
+  // right here, before any of it reaches Date.
+  if (mo < 1 || mo > 12 || d < 1 || h > 23 || min > 59 || sec > 60) return null;
+  const date = new Date(y, mo - 1, d, h, min, sec);
+  // The date then has to survive the round trip, which catches what a range check cannot: a bare
+  // year under 100 lands silently in the 1900s, and 02:31 rolls forward into March. Only the date
+  // is checked, so a stamp inside a DST gap normalises rather than being thrown away.
+  return date.getFullYear() === y && date.getMonth() === mo - 1 && date.getDate() === d ? date : null;
+}
+
+function dateTag(t, ifd, le, tag) {
+  const f = tagValue(t, ifd, le, tag);
+  if (!f || f.type !== ASCII) return null;
+  let s = '';
+  for (let i = 0; i < f.count; i++) {
+    const c = t.getUint8(f.at + i);
+    if (c === 0) break; // count includes the terminating NUL
+    s += String.fromCharCode(c);
+  }
+  return stampToDate(s.trim());
+}
+
+// bytes: an ArrayBuffer or a view over one. The head of the file is enough — see index.html.
+// Returns the capture time as a local Date, or null when the file has none to give.
+export function exifDateTime(bytes) {
+  try {
+    const v = ArrayBuffer.isView(bytes)
+      ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      : new DataView(bytes);
+    const t = exifTiff(v);
+    if (!t) return null;
+    const order = t.getUint16(0);
+    if (order !== 0x4949 && order !== 0x4d4d) return null; // "II" little-endian / "MM" big-endian
+    const le = order === 0x4949;
+    if (t.getUint16(2, le) !== 0x2a) return null; // TIFF's 42, which also proves the order read
+    const ifd0 = t.getUint32(4, le);
+    const ptr = tagValue(t, ifd0, le, TAG_EXIF_IFD);
+    const inExif = (tag) =>
+      ptr && ptr.type === LONG ? dateTag(t, t.getUint32(ptr.at, le), le, tag) : null;
+    // Shutter time first. Digitized matches it on a camera and is what a scan carries instead.
+    // IFD0's DateTime comes last: it is an edit time, but it still travels with the pixels, which
+    // is more than the mtime the caller falls back to can claim.
+    return inExif(TAG_ORIGINAL) ?? inExif(TAG_DIGITIZED) ?? dateTag(t, ifd0, le, TAG_DATE_TIME);
+  } catch {
+    return null; // truncated head or offsets pointing off the end — the caller falls back to the mtime
+  }
+}
+
 // Fill the cell, preserving aspect ratio, cropping from the center (CSS object-fit: cover).
 // No imageSmoothingQuality here on purpose: rendering a 3024x4032 photo into a 962x645 preview
 // cell gave byte-identical output at 'low' and 'high' (max per-pixel difference 0 over 620k
