@@ -30,6 +30,7 @@ export const SPEC = {
 };
 
 export const PER_PAGE = SPEC.cols * SPEC.rows;
+export const perPage = (cols = SPEC.cols) => cols * SPEC.rows;
 
 const googleFont = (family) =>
   `https://fonts.googleapis.com/css2?family=${family.replace(/ /g, '+')}:wght@400&display=swap`;
@@ -75,10 +76,10 @@ export function previewWidth(cssW, dpr = 1) {
   return Math.min(Math.max(Math.round(cssW * dpr) || 0, 320), SPEC.ref);
 }
 
-export function cellRect(i, W) {
-  const col = i % SPEC.cols;
-  const row = Math.floor(i / SPEC.cols);
-  const w = W / SPEC.cols;
+export function cellRect(i, W, cols = SPEC.cols) {
+  const col = i % cols;
+  const row = Math.floor(i / cols);
+  const w = W / cols;
   const top = row * SPEC.rowPitch * W;
   return {
     x: col * w,
@@ -284,8 +285,8 @@ export function drawCaption(ctx, lines, cx, cy, W, font) {
   }
 }
 
-// items: [{ img, stamp, note }] — at most PER_PAGE. Remaining cells stay white.
-export function renderPage(canvas, items, W, stack = CAPTION_FONT) {
+// items: [{ img, stamp, note }] — at most perPage(cols). Remaining cells stay white.
+export function renderPage(canvas, items, W, stack = CAPTION_FONT, cols = SPEC.cols) {
   const { w, h } = canvasSize(W);
   canvas.width = w;
   canvas.height = h;
@@ -295,8 +296,9 @@ export function renderPage(canvas, items, W, stack = CAPTION_FONT) {
   // Measured on every render rather than cached: measuring before the webfont has loaded
   // reads the fallback face, and a cache would keep serving those numbers forever.
   const font = measureCaptionFont(ctx, stack);
-  items.slice(0, PER_PAGE).forEach((it, i) => {
-    const r = cellRect(i, W);
+  const limit = cols * SPEC.rows;
+  items.slice(0, limit).forEach((it, i) => {
+    const r = cellRect(i, W, cols);
     if (it.img) drawCover(ctx, it.img, r.x, r.y, r.w, r.h);
     const lines = [it.stamp, it.note].filter(Boolean);
     if (lines.length) drawCaption(ctx, lines, r.colCenterX, r.capCenterY, W, font);

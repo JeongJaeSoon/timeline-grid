@@ -91,7 +91,7 @@
   <h1>Timeline Grid</h1>
   <p class="sub">
     사진을 여러 장 올리고 사진마다 시각과 문구를 적으면, 하루의 흐름을 담은 타임라인 콜라주를 만들어 줍니다.
-    3&times;2 여섯 컷이 한 장이고, 넘치면 자동으로 다음 장으로 넘어갑니다.
+    1열(3컷) 또는 2열(6컷)을 선택할 수 있고, 넘치면 자동으로 다음 장으로 넘어갑니다.
     모든 처리는 브라우저 안에서 끝나며 사진은 어디로도 전송되지 않습니다.
   </p>
 
@@ -108,6 +108,10 @@
       <h2 style="margin:0 8px 0 0">사진</h2>
       <span class="count" id="count">0장</span>
       <span class="grow"></span>
+      <select id="cols" title="열 수">
+        <option value="2">2열</option>
+        <option value="1">1열</option>
+      </select>
       <select id="font" title="캡션 폰트"></select>
       <select id="locale" title="캡션 날짜 표기">
         <option value="en-US">English — 04:56, Thursday, July 09</option>
@@ -133,7 +137,7 @@
 
 <script type="module">
 import {
-  PER_PAGE, SPEC, FONTS, paginate, formatStamp, renderPage, previewWidth, exifDateTime,
+  SPEC, FONTS, perPage, paginate, formatStamp, renderPage, previewWidth, exifDateTime,
 } from './timeline.js';
 
 const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
@@ -249,6 +253,7 @@ for (const [label, hangul] of [['라틴 전용', false], ['한글 지원', true]
 }
 
 const currentFont = () => FONTS.find((f) => f.family === $('font').value) ?? FONTS[0];
+const currentCols = () => Number($('cols').value);
 
 // Linked on pick rather than upfront — the four Hangul families are 58-98KB of CSS each,
 // which is more than the rest of this app put together.
@@ -309,7 +314,8 @@ const captionText = (page) => page.map((p) => `${p.stamp}${p.note}`).join('');
 
 function drawPages() {
   const rendered = items.map(toRenderItem);
-  const pages = paginate(rendered);
+  const cols = currentCols();
+  const pages = paginate(rendered, perPage(cols));
   const { stack } = currentFont();
   const host = $('pages');
   host.textContent = '';
@@ -335,7 +341,7 @@ function drawPages() {
   // bitmap below cannot feed back into it. Every page is the same width, so measure one.
   if (canvases.length) {
     const W = previewWidth(canvases[0].getBoundingClientRect().width, devicePixelRatio);
-    canvases.forEach((canvas, i) => renderPage(canvas, pages[i], W, stack));
+    canvases.forEach((canvas, i) => renderPage(canvas, pages[i], W, stack, cols));
   }
   $('pagesEmpty').hidden = pages.length > 0;
   $('dlAll').disabled = pages.length === 0;
@@ -346,7 +352,7 @@ function drawPages() {
 async function download(page, i) {
   const { stack } = await loadFont(captionText(page)); // never export in the fallback face
   const canvas = document.createElement('canvas');
-  renderPage(canvas, page, EXPORT_W, stack);
+  renderPage(canvas, page, EXPORT_W, stack, currentCols());
   const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -368,6 +374,7 @@ for (const type of ['dragleave', 'drop']) {
 }
 $('drop').addEventListener('drop', (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
 
+$('cols').addEventListener('change', () => refresh());
 $('font').addEventListener('change', () => refresh());
 $('locale').addEventListener('change', () => refresh());
 $('sort').addEventListener('click', () => { items.sort((a, b) => a.dt - b.dt); refresh(true); });
@@ -378,7 +385,8 @@ $('clear').addEventListener('click', () => {
   refresh(true);
 });
 $('dlAll').addEventListener('click', async () => {
-  const pages = paginate(items.map(toRenderItem));
+  const cols = currentCols();
+  const pages = paginate(items.map(toRenderItem), perPage(cols));
   for (let i = 0; i < pages.length; i++) await download(pages[i], i);
 });
 
