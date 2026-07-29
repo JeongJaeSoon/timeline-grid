@@ -4,8 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SPEC, FONTS, CAPTION_FONT, canvasSize, cellRect, paginate, formatStamp,
-  measureCaptionFont, drawCaption, previewWidth, exifDateTime,
+  SPEC, FONTS, CAPTION_FONT, LAYOUTS, layoutFor, perPage, canvasSize, cellRect, paginate,
+  formatStamp, measureCaptionFont, drawCaption, previewWidth, exifDateTime,
 } from './timeline.js';
 
 const W = SPEC.ref; // 3077 — the width the source was measured at
@@ -160,6 +160,43 @@ test('pages hold six photos each', () => {
   assert.deepEqual(n(paginate(Array(7).fill(0))), [6, 1]);
   assert.deepEqual(n(paginate(Array(12).fill(0))), [6, 6]);
   assert.deepEqual(paginate([]), []);
+});
+
+test('4-column layout runs 2 rows, not 3 — 8 photos a page', () => {
+  assert.deepEqual(layoutFor(4), { cols: 4, rows: 2 });
+  assert.equal(perPage(4), 8);
+  const n = (arr) => arr.map((p) => p.length);
+  assert.deepEqual(n(paginate(Array(9).fill(0), perPage(4))), [8, 1]);
+});
+
+test('an unknown column count falls back to the default 2-column layout', () => {
+  assert.deepEqual(layoutFor(3), layoutFor(2));
+});
+
+test('canvas height scales with row count, keeping the same per-row pitch and tail', () => {
+  // 2 rows of the same pitch as the 3-row source, minus one row's worth of height.
+  const twoRow = canvasSize(W, 2);
+  const threeRow = canvasSize(W);
+  near(threeRow.h - twoRow.h, SPEC.rowPitch * W, 1, 'one row of height');
+});
+
+test('4-column cells sit side by side at the same row pitch as 2-column', () => {
+  const rows = layoutFor(4).rows;
+  assert.equal(rows, 2);
+  for (let i = 0; i < 8; i++) {
+    const r = cellRect(i, W, 4);
+    const row = Math.floor(i / 4);
+    near(r.y, row * SPEC.rowPitch * W, 1, `row ${row} top`);
+    near(r.w, W / 4, 0.5, 'cell width');
+  }
+  // Zero gutter across all four columns, same as the 2-column grid.
+  for (let col = 0; col < 3; col++) {
+    assert.equal(cellRect(col, W, 4).x + cellRect(col, W, 4).w, cellRect(col + 1, W, 4).x);
+  }
+});
+
+test('layout lineup includes 1, 2, and 4 columns, none dropped', () => {
+  assert.deepEqual(LAYOUTS.map((l) => l.cols).sort(), [1, 2, 4]);
 });
 
 test('timestamp formatting', () => {
