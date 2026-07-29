@@ -30,7 +30,23 @@ export const SPEC = {
 };
 
 export const PER_PAGE = SPEC.cols * SPEC.rows;
-export const perPage = (cols = SPEC.cols) => cols * SPEC.rows;
+
+// cols -> rows for every supported layout. 4 columns run 2 rows (8 photos) rather than 3 (12) —
+// a grid that tall would ask for more photos than a single day's timeline usually has.
+export const LAYOUTS = [
+  { cols: 1, rows: SPEC.rows },
+  { cols: SPEC.cols, rows: SPEC.rows },
+  { cols: 4, rows: 2 },
+];
+const DEFAULT_LAYOUT = LAYOUTS.find((l) => l.cols === SPEC.cols);
+export const layoutFor = (cols) => LAYOUTS.find((l) => l.cols === cols) ?? DEFAULT_LAYOUT;
+
+export const perPage = (cols = SPEC.cols) => cols * layoutFor(cols).rows;
+
+// Canvas height scales with row count: every row keeps the source's measured rowPitch, and the
+// same clear air trails the last caption as in the 3-row source this was measured from.
+const TAIL = SPEC.aspect - SPEC.rows * SPEC.rowPitch;
+export const aspectFor = (rows = SPEC.rows) => rows * SPEC.rowPitch + TAIL;
 
 const googleFont = (family) =>
   `https://fonts.googleapis.com/css2?family=${family.replace(/ /g, '+')}:wght@400&display=swap`;
@@ -59,8 +75,8 @@ export const FONTS = [
 
 export const CAPTION_FONT = FONTS[0].stack;
 
-export function canvasSize(W) {
-  return { w: Math.round(W), h: Math.round(W * SPEC.aspect) };
+export function canvasSize(W, rows = SPEC.rows) {
+  return { w: Math.round(W), h: Math.round(W * aspectFor(rows)) };
 }
 
 // Preview canvases stretch to their container (`width: 100%`), so the bitmap has to be the size
@@ -287,7 +303,8 @@ export function drawCaption(ctx, lines, cx, cy, W, font) {
 
 // items: [{ img, stamp, note }] — at most perPage(cols). Remaining cells stay white.
 export function renderPage(canvas, items, W, stack = CAPTION_FONT, cols = SPEC.cols) {
-  const { w, h } = canvasSize(W);
+  const { rows } = layoutFor(cols);
+  const { w, h } = canvasSize(W, rows);
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
@@ -296,7 +313,7 @@ export function renderPage(canvas, items, W, stack = CAPTION_FONT, cols = SPEC.c
   // Measured on every render rather than cached: measuring before the webfont has loaded
   // reads the fallback face, and a cache would keep serving those numbers forever.
   const font = measureCaptionFont(ctx, stack);
-  const limit = cols * SPEC.rows;
+  const limit = cols * rows;
   items.slice(0, limit).forEach((it, i) => {
     const r = cellRect(i, W, cols);
     if (it.img) drawCover(ctx, it.img, r.x, r.y, r.w, r.h);
