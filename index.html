@@ -221,6 +221,7 @@ function buildCard(item) {
   el.querySelector('.down').addEventListener('click', () => move(item, 1));
   el.querySelector('.del').addEventListener('click', () => {
     items.splice(items.indexOf(item), 1);
+    item.el?.remove();
     URL.revokeObjectURL(item.thumb);
     refresh(true);
   });
