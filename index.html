@@ -71,7 +71,8 @@
 
   #pages { display: grid; gap: 28px; }
   .page { background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 14px; }
-  .page canvas { width: 100%; height: auto; display: block; }
+  .page canvas { width: 100%; height: auto; display: block; touch-action: none; cursor: grab; }
+  .page canvas:active { cursor: grabbing; }
   .page .row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
   .page .row span { color: var(--muted); font-size: 13px; flex: 1; }
 
@@ -139,6 +140,7 @@
 <script type="module">
 import {
   SPEC, FONTS, perPage, paginate, formatStamp, renderPage, previewWidth, exifDateTime,
+  cellRect, layoutFor,
 } from './timeline.js';
 
 const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
@@ -184,6 +186,9 @@ async function addFiles(fileList) {
       thumb: URL.createObjectURL(file),
       dt,
       note: '',
+      zoom: 1,
+      panX: 0,
+      panY: 0,
       el: null,
     });
   }
@@ -299,6 +304,9 @@ const toRenderItem = (it) => ({
   img: it.img,
   stamp: formatStamp(it.dt, $('locale').value),
   note: it.note,
+  zoom: it.zoom,
+  panX: it.panX,
+  panY: it.panY,
 });
 
 // Only re-place the card DOM when relayout=true — typing must not lose focus.
@@ -313,6 +321,11 @@ function refresh(relayout = false) {
 }
 
 const captionText = (page) => page.map((p) => `${p.stamp}${p.note}`).join('');
+
+// { canvas, W, cols, pageIndex } per rendered preview canvas — rebuilt on every drawPages().
+// Kept around so a drag/pinch/wheel gesture can repaint just the affected canvas (paintOnly)
+// instead of tearing down and rebuilding the whole page list on every pointermove.
+let pageMeta = [];
 
 function drawPages() {
   const rendered = items.map(toRenderItem);
@@ -341,14 +354,149 @@ function drawPages() {
   // Sized only once they are in the document: `width: 100%` gives a canvas its layout width from
   // the container, which is why this reads right before any bitmap exists and why setting the
   // bitmap below cannot feed back into it. Every page is the same width, so measure one.
+  pageMeta = [];
   if (canvases.length) {
     const W = previewWidth(canvases[0].getBoundingClientRect().width, devicePixelRatio);
-    canvases.forEach((canvas, i) => renderPage(canvas, pages[i], W, stack, cols));
+    canvases.forEach((canvas, i) => {
+      renderPage(canvas, pages[i], W, stack, cols);
+      const meta = { canvas, W, cols, pageIndex: i };
+      pageMeta.push(meta);
+      attachInteraction(canvas, meta);
+    });
   }
   $('pagesEmpty').hidden = pages.length > 0;
   $('dlAll').disabled = pages.length === 0;
   // The pass above may have drawn in the fallback face; redraw once the real one lands.
   ensureFont(captionText(rendered));
+}
+
+// Repaints existing canvases in place with current item.zoom/panX/panY, without touching the DOM
+// — used while a drag/pinch/wheel gesture is in progress so per-page download button closures
+// (which capture a `page` array) aren't invalidated mid-gesture.
+function paintOnly() {
+  const { stack } = currentFont();
+  for (const m of pageMeta) {
+    const per = perPage(m.cols);
+    const page = items.slice(m.pageIndex * per, m.pageIndex * per + per).map(toRenderItem);
+    renderPage(m.canvas, page, m.W, stack, m.cols);
+  }
+}
+
+let commitTimer;
+// Rebuilds the page DOM (and its download-button closures) shortly after a gesture settles.
+function scheduleCommit() {
+  clearTimeout(commitTimer);
+  commitTimer = setTimeout(drawPages, 400);
+}
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+function hitTest(x, y, W, cols) {
+  const { rows } = layoutFor(cols);
+  const limit = cols * rows;
+  for (let i = 0; i < limit; i++) {
+    const r = cellRect(i, W, cols);
+    if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return i;
+  }
+  return -1;
+}
+
+// Drag to pan, wheel or pinch to zoom, within whichever cell the gesture started in. Panning and
+// pinching share one pointermove listener via the Pointer Events API (mouse, touch and pen all
+// report through it), keyed on how many pointers are currently down on this canvas.
+function attachInteraction(canvas, meta) {
+  const pointers = new Map(); // pointerId -> last {x, y} in canvas-pixel space
+  let itemIdx = null; // index into the global `items` array
+  let localIdx = null; // cell index within this page
+  let start = null;
+
+  const point = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    };
+  };
+
+  // How far (in canvas px) the image can shift off-center at its current zoom before a gap
+  // would show in the cell — the same quantity drawCover() reads panX/panY as a fraction of.
+  const slackFor = (item, w, h) => {
+    const s = Math.max(w / item.img.width, h / item.img.height) * item.zoom;
+    return {
+      sx: Math.max(0, (item.img.width * s - w) / 2),
+      sy: Math.max(0, (item.img.height * s - h) / 2),
+    };
+  };
+
+  function beginGesture() {
+    if (pointers.size === 1) {
+      const [p] = pointers.values();
+      const idx = hitTest(p.x, p.y, meta.W, meta.cols);
+      const per = perPage(meta.cols);
+      const item = idx >= 0 ? items[meta.pageIndex * per + idx] : null;
+      if (!item) { itemIdx = null; start = null; return; }
+      itemIdx = meta.pageIndex * per + idx;
+      localIdx = idx;
+      start = { mode: 'pan', panX: item.panX, panY: item.panY, x: p.x, y: p.y };
+    } else if (pointers.size === 2 && itemIdx != null) {
+      const [a, b] = [...pointers.values()];
+      start = { mode: 'pinch', zoom: items[itemIdx].zoom, dist: Math.hypot(a.x - b.x, a.y - b.y) };
+    }
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    try { canvas.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
+    pointers.set(e.pointerId, point(e));
+    beginGesture();
+    e.preventDefault();
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointers.has(e.pointerId) || itemIdx == null || !start) return;
+    const p = point(e);
+    pointers.set(e.pointerId, p);
+    const item = items[itemIdx];
+    if (start.mode === 'pan' && pointers.size === 1) {
+      const r = cellRect(localIdx, meta.W, meta.cols);
+      const { sx, sy } = slackFor(item, r.w, r.h);
+      item.panX = sx > 0 ? clamp(start.panX + (p.x - start.x) / sx, -1, 1) : 0;
+      item.panY = sy > 0 ? clamp(start.panY + (p.y - start.y) / sy, -1, 1) : 0;
+      paintOnly();
+    } else if (start.mode === 'pinch' && pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      if (start.dist > 0) item.zoom = clamp(start.zoom * (dist / start.dist), 1, 4);
+      paintOnly();
+    }
+    e.preventDefault();
+  });
+
+  const end = (e) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size === 0) {
+      const changed = itemIdx != null;
+      itemIdx = null;
+      start = null;
+      if (changed) drawPages(); // refresh download-button closures with the final crop
+    } else {
+      beginGesture(); // re-baseline, e.g. pinch -> pan when one finger lifts
+    }
+  };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+
+  canvas.addEventListener('wheel', (e) => {
+    const p = point(e);
+    const idx = hitTest(p.x, p.y, meta.W, meta.cols);
+    if (idx < 0) return;
+    e.preventDefault();
+    const per = perPage(meta.cols);
+    const item = items[meta.pageIndex * per + idx];
+    if (!item) return;
+    item.zoom = clamp(item.zoom * Math.exp(-e.deltaY * 0.0015), 1, 4);
+    paintOnly();
+    scheduleCommit();
+  }, { passive: false });
 }
 
 async function download(page, i) {
