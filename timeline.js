@@ -249,20 +249,27 @@ export function exifDateTime(bytes) {
   }
 }
 
-// Fill the cell, preserving aspect ratio, cropping from the center (CSS object-fit: cover).
+// Fill the cell, preserving aspect ratio, cropping from the center (CSS object-fit: cover),
+// then optionally zoom in and re-center the crop. zoom is a multiplier on top of the cover fit
+// (1 = plain cover, >1 crops tighter). panX/panY are in [-1, 1] and read as a fraction of the
+// slack — how far the image can shift before a gap would show — rather than raw pixels, so the
+// same stored values reproduce the same framing on both the preview canvas and the full-size
+// export even though their pixel dimensions differ.
 // No imageSmoothingQuality here on purpose: rendering a 3024x4032 photo into a 962x645 preview
 // cell gave byte-identical output at 'low' and 'high' (max per-pixel difference 0 over 620k
 // pixels), and upscaling a 400x300 one differed by 0.013 per channel — Chrome's GPU canvas
 // ignores the hint on this path, so setting it would be a line that reads like it does something.
-export function drawCover(ctx, img, x, y, w, h) {
-  const s = Math.max(w / img.width, h / img.height);
+export function drawCover(ctx, img, x, y, w, h, zoom = 1, panX = 0, panY = 0) {
+  const s = Math.max(w / img.width, h / img.height) * zoom;
   const dw = img.width * s;
   const dh = img.height * s;
+  const slackX = Math.max(0, (dw - w) / 2);
+  const slackY = Math.max(0, (dh - h) / 2);
   ctx.save();
   ctx.beginPath();
   ctx.rect(x, y, w, h);
   ctx.clip();
-  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  ctx.drawImage(img, x + (w - dw) / 2 + panX * slackX, y + (h - dh) / 2 + panY * slackY, dw, dh);
   ctx.restore();
 }
 
@@ -316,7 +323,7 @@ export function renderPage(canvas, items, W, stack = CAPTION_FONT, cols = SPEC.c
   const limit = cols * rows;
   items.slice(0, limit).forEach((it, i) => {
     const r = cellRect(i, W, cols);
-    if (it.img) drawCover(ctx, it.img, r.x, r.y, r.w, r.h);
+    if (it.img) drawCover(ctx, it.img, r.x, r.y, r.w, r.h, it.zoom, it.panX, it.panY);
     const lines = [it.stamp, it.note].filter(Boolean);
     if (lines.length) drawCaption(ctx, lines, r.colCenterX, r.capCenterY, W, font);
   });
