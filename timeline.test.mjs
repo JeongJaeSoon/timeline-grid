@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   SPEC, FONTS, CAPTION_FONT, LAYOUTS, layoutFor, perPage, canvasSize, cellRect, paginate,
   formatStamp, measureCaptionFont, drawCaption, previewWidth, exifDateTime,
+  SHARE_W, SERVICES, sharePlan, intentUrl, shareText,
 } from './timeline.js';
 
 const W = SPEC.ref; // 3077 — the width the source was measured at
@@ -387,4 +388,59 @@ test('a value offset pointing past the APP1 segment reads nothing', () => {
 test('an ArrayBuffer works as well as a view over one', () => {
   const file = shot({ exif: { [ORIGINAL]: '2026:07:09 04:56:00' } });
   assert.deepEqual(exifDateTime(file.buffer.slice(0, file.byteLength)), SOURCE_FIRST_FRAME);
+});
+
+/* ---------- sharing ---------- */
+
+// Everything below encodes what each platform actually accepts, measured or read off the docs:
+// Instagram has no intent URL and its web composer takes neither a paste nor a prefill, X and
+// Threads both document /intent/post?text=, and no service takes an image through a URL at all.
+
+test('the share bitmap is the size Instagram posts uncropped', () => {
+  // The collage is 3:4 (3077x4096), which is exactly the 1080x1440 Instagram's 2025 grid takes
+  // without cropping. Rendering the share copy at 1080 rather than the export's 3077 is also
+  // what keeps it cheap enough to have ready before the click — 33ms against 192ms, measured.
+  assert.equal(SHARE_W, 1080);
+  assert.deepEqual(canvasSize(SHARE_W), { w: 1080, h: 1438 });
+});
+
+test('a platform that shares files gets the share sheet, whatever the service', () => {
+  for (const service of SERVICES.map((s) => s.id)) {
+    assert.equal(sharePlan({ service, canShareFiles: true, canCopyImage: true }), 'share');
+    assert.equal(sharePlan({ service, canShareFiles: true, canCopyImage: false }), 'share');
+  }
+});
+
+test('without the share sheet, only X and Threads can take a pasted image', () => {
+  const opts = { canShareFiles: false, canCopyImage: true };
+  assert.equal(sharePlan({ ...opts, service: 'x' }), 'clipboard');
+  assert.equal(sharePlan({ ...opts, service: 'threads' }), 'clipboard');
+  // Instagram's web composer opens a file picker and ignores a paste, so the file has to land
+  // on disk where the picker can reach it.
+  assert.equal(sharePlan({ ...opts, service: 'instagram' }), 'download');
+});
+
+test('no clipboard leaves the download for everyone', () => {
+  for (const service of SERVICES.map((s) => s.id)) {
+    assert.equal(sharePlan({ service, canShareFiles: false, canCopyImage: false }), 'download');
+  }
+});
+
+test('intent URLs are the documented endpoints, and only two services have one', () => {
+  assert.equal(intentUrl('x'), 'https://x.com/intent/post');
+  assert.equal(intentUrl('threads'), 'https://www.threads.net/intent/post');
+  assert.equal(intentUrl('instagram'), 'https://www.instagram.com/');
+});
+
+test('prefill text is URL-encoded, and skipped when there is none', () => {
+  assert.equal(intentUrl('x', '카페 · 퇴근'), 'https://x.com/intent/post?text=%EC%B9%B4%ED%8E%98%20%C2%B7%20%ED%87%B4%EA%B7%BC');
+  assert.equal(intentUrl('x', ''), 'https://x.com/intent/post');
+  // Instagram takes no parameters at all — handing it one would just be a URL that does nothing.
+  assert.equal(intentUrl('instagram', '카페'), 'https://www.instagram.com/');
+});
+
+test('prefill text is the notes, in page order, and nothing when none were typed', () => {
+  const page = [{ note: '카페에서 아침' }, { note: '' }, { note: '퇴근길' }];
+  assert.equal(shareText(page), '카페에서 아침 · 퇴근길');
+  assert.equal(shareText([{ note: '' }, {}]), '');
 });
