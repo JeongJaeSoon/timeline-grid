@@ -194,6 +194,20 @@ async function captureTime(file) {
   }
 }
 
+// The card's <img> is 78x52. Pointing it at the original file made the browser decode all 12MP
+// a second time to fill that box — 534ms for twelve photos against 5ms this way, and the object
+// URL pinned the file's bytes (55MB for twelve) for as long as the card lived. The decoded
+// bitmap is already in hand, so scale it once. 156px is twice the box, what a DPR 2 screen asks
+// for; the cropping is the card's existing object-fit.
+const THUMB_W = 156;
+function thumbUrl(img) {
+  const c = document.createElement('canvas');
+  c.width = THUMB_W;
+  c.height = Math.max(1, Math.round((THUMB_W * img.height) / img.width));
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.7); // ~4KB, against the megabytes the object URL held open
+}
+
 async function addFiles(fileList) {
   // Everything picked is tried, rather than only what the OS tagged image/*. Whatever is not an
   // image fails the decode below and gets named in the note, which is the point: a file thrown
@@ -219,7 +233,7 @@ async function addFiles(fileList) {
     items.push({
       id: ++seq,
       img,
-      thumb: URL.createObjectURL(files[i]),
+      thumb: thumbUrl(img),
       dt,
       note: '',
       zoom: 1,
@@ -266,7 +280,6 @@ function buildCard(item) {
   el.querySelector('.del').addEventListener('click', () => {
     items.splice(items.indexOf(item), 1);
     item.el?.remove();
-    URL.revokeObjectURL(item.thumb);
     refresh(true);
   });
   item.el = el;
@@ -693,7 +706,6 @@ $('font').addEventListener('change', () => refresh());
 $('locale').addEventListener('change', () => refresh());
 $('sort').addEventListener('click', () => { items.sort((a, b) => a.dt - b.dt); refresh(true); });
 $('clear').addEventListener('click', () => {
-  for (const it of items) URL.revokeObjectURL(it.thumb);
   items.length = 0;
   $('list').textContent = '';
   refresh(true);
