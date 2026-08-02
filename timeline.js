@@ -26,7 +26,7 @@ export const SPEC = {
   // as that gap rather than as a fixed leading, because ink height varies a lot between faces
   // (0.91em for Tinos, 1.08em for Noto Serif KR) and fixed leading left the latter 1.4px apart.
   // Line pitch is therefore measured ink + this, which reproduces the source's 50px for Tinos.
-  lineGap: 0.4,
+  lineGap: 0.2,
 };
 
 export const PER_PAGE = SPEC.cols * SPEC.rows;
