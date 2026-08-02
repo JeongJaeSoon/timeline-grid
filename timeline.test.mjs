@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   SPEC, FONTS, CAPTION_FONT, LAYOUTS, layoutFor, perPage, canvasSize, cellRect, paginate,
   formatStamp, measureCaptionFont, drawCaption, previewWidth, exifDateTime,
-  SHARE_W, SERVICES, sharePlan, intentUrl, shareText,
+  SHARE_W, SERVICES, sharePlan, intentUrl, shareText, skippedNote,
 } from './timeline.js';
 
 const W = SPEC.ref; // 3077 — the width the source was measured at
@@ -443,4 +443,32 @@ test('prefill text is the notes, in page order, and nothing when none were typed
   const page = [{ note: '카페에서 아침' }, { note: '' }, { note: '퇴근길' }];
   assert.equal(shareText(page), '카페에서 아침 · 퇴근길');
   assert.equal(shareText([{ note: '' }, {}]), '');
+});
+
+/* ---------- files the browser could not open ---------- */
+// One undecodable file used to take the whole batch down: the rejection escaped addFiles and
+// the photos already read never got drawn. They are skipped now, and this is what gets said
+// about them.
+
+test('nothing skipped, nothing said', () => {
+  assert.equal(skippedNote([]), '');
+});
+
+test('every skipped file is named', () => {
+  const note = skippedNote(['a.webp', 'b.avif']);
+  assert.match(note, /a\.webp/);
+  assert.match(note, /b\.avif/);
+});
+
+test('HEIC gets the advice that actually fixes it, other formats do not', () => {
+  // Read off the name rather than file.type: what a browser calls a .heic varies, and a
+  // caller that got here at all has already been told the type looked like an image.
+  for (const name of ['IMG_0001.HEIC', 'img.heic', 'live.heif']) {
+    assert.match(skippedNote([name]), /높은 호환성/, name);
+  }
+  assert.doesNotMatch(skippedNote(['b.avif']), /높은 호환성/);
+  // Mixed batch: the advice belongs there as long as one of them is a HEIC.
+  assert.match(skippedNote(['b.avif', 'IMG_0001.HEIC']), /높은 호환성/);
+  // ".heiconvert.png" is not a HEIC — the extension has to end the name.
+  assert.doesNotMatch(skippedNote(['x.heiconvert.png']), /높은 호환성/);
 });

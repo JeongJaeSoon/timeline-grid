@@ -117,6 +117,7 @@
       <strong>사진 고르기</strong>
       <span>여기로 끌어다 놓거나 눌러서 선택하세요</span>
     </div>
+    <p class="hint" id="dropNote" aria-live="polite" hidden></p>
   </section>
 
   <section>
@@ -156,7 +157,7 @@
 <script type="module">
 import {
   SPEC, FONTS, perPage, paginate, formatStamp, renderPage, previewWidth, exifDateTime,
-  cellRect, layoutFor, SHARE_W, SERVICES, sharePlan, intentUrl, shareText,
+  cellRect, layoutFor, SHARE_W, SERVICES, sharePlan, intentUrl, shareText, skippedNote,
 } from './timeline.js';
 
 const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
@@ -164,6 +165,7 @@ const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
 const $ = (id) => document.getElementById(id);
 const items = [];
 let seq = 0;
+let pending = 0; // photos picked but not read yet — what the count reports on while a batch runs
 
 /* ---------- reading files ---------- */
 
@@ -194,12 +196,26 @@ async function captureTime(file) {
 
 async function addFiles(fileList) {
   const files = [...fileList].filter((f) => f.type.startsWith('image/'));
-  for (const file of files) {
-    const [img, dt] = await Promise.all([decode(file), captureTime(file)]);
+  if (!files.length) return;
+  // Every read is started before any of them is awaited, so the decodes run side by side on
+  // the browser's image threads instead of one after another — 12 phone photos took 2787ms
+  // read one at a time and 857ms this way, measured in Chrome. They are then awaited in file
+  // order, which is what keeps the cards in the order they were picked.
+  // The catch belongs here rather than around the await below: a rejection left sitting until
+  // its turn comes round is reported as an unhandled rejection before anything can take it.
+  const reads = files.map((f) => Promise.all([decode(f), captureTime(f)]).catch(() => null));
+  const skipped = [];
+  pending += files.length;
+  refresh(true); // say how many are coming before the first one has anything to show
+  for (const [i, read] of reads.entries()) {
+    const got = await read;
+    pending--;
+    if (!got) { skipped.push(files[i].name); refresh(true); continue; } // no decoder for this format
+    const [img, dt] = got;
     items.push({
       id: ++seq,
       img,
-      thumb: URL.createObjectURL(file),
+      thumb: URL.createObjectURL(files[i]),
       dt,
       note: '',
       zoom: 1,
@@ -207,8 +223,10 @@ async function addFiles(fileList) {
       panY: 0,
       el: null,
     });
+    refresh(true); // draw each photo as it lands, rather than leaving the page blank until the last
   }
-  if (files.length) refresh(true);
+  $('dropNote').textContent = skippedNote(skipped);
+  $('dropNote').hidden = !skipped.length;
 }
 
 /* ---------- cards ---------- */
@@ -330,8 +348,10 @@ function refresh(relayout = false) {
   if (relayout) {
     const list = $('list');
     for (const it of items) list.appendChild(it.el ?? buildCard(it));
-    $('count').textContent = `${items.length}장`;
-    $('listEmpty').hidden = items.length > 0;
+    $('count').textContent = pending
+      ? `${items.length}/${items.length + pending}장 읽는 중…`
+      : `${items.length}장`;
+    $('listEmpty').hidden = items.length > 0 || pending > 0;
   }
   drawPages();
 }

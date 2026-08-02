@@ -92,6 +92,21 @@ export function previewWidth(cssW, dpr = 1) {
   return Math.min(Math.max(Math.round(cssW * dpr) || 0, 320), SPEC.ref);
 }
 
+/* ---------- files the browser cannot open ---------- */
+
+// What to say about the files a pick had to skip. HEIC is the iPhone's default format and no
+// engine but WebKit decodes it, so it is worth more than being named: the setting that stops
+// the phone producing them is two taps away, and nothing else the user does here will help.
+// Matched on the name rather than on file.type, which is whatever the OS told the browser to
+// call the extension and is empty often enough to not be worth trusting.
+export function skippedNote(names) {
+  if (!names.length) return '';
+  const note = `${names.join(', ')} — 이 브라우저가 열지 못해 건너뛰었습니다.`;
+  return names.some((n) => /\.hei[cf]$/i.test(n))
+    ? `${note} HEIC는 Safari 밖에서는 열리지 않습니다 — 설정 > 카메라 > 포맷을 '높은 호환성'으로 두거나 JPEG로 바꿔 올려주세요.`
+    : note;
+}
+
 /* ---------- sharing ---------- */
 
 // The width the copy handed to a social app is rendered at, rather than the export's 3077.
