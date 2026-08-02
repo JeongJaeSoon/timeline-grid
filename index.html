@@ -195,7 +195,11 @@ async function captureTime(file) {
 }
 
 async function addFiles(fileList) {
-  const files = [...fileList].filter((f) => f.type.startsWith('image/'));
+  // Everything picked is tried, rather than only what the OS tagged image/*. Whatever is not an
+  // image fails the decode below and gets named in the note, which is the point: a file thrown
+  // out by that filter left no card and said nothing, the same bug the note fixes one layer down.
+  // file.type is the OS's guess from the extension and is empty often enough to lose real photos.
+  const files = [...fileList];
   if (!files.length) return;
   // Every read is started before any of them is awaited, so the decodes run side by side on
   // the browser's image threads instead of one after another — 12 phone photos took 2787ms
