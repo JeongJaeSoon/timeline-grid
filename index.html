@@ -194,8 +194,33 @@ async function captureTime(file) {
   }
 }
 
+// The card's <img> is 78x52. Pointing it at the original file made the browser decode all 12MP
+// a second time to paint that box — 1,705ms of decode for twelve photos, and the object URL
+// pinned the file's bytes for as long as the card lived. The decoded bitmap is already here, so
+// scale it down once instead. 156px is twice the box, which is what a DPR 2 screen asks for;
+// the card's object-fit does the cropping.
+const THUMB_W = 156;
+function thumbUrl(img) {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const c = document.createElement('canvas');
+  c.width = THUMB_W;
+  c.height = Math.max(1, Math.round((THUMB_W * h) / w));
+  // willReadFrequently keeps this canvas on the CPU, which is what toDataURL wants to read back:
+  // twelve photos cost 10ms this way against 275ms on the default GPU-backed canvas. The default
+  // smoothing is left alone for the same reason — asking for 'high' costs 133ms instead of 10ms
+  // and moves 1% of a channel on a 78px thumbnail.
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.7);
+}
+
 async function addFiles(fileList) {
-  const files = [...fileList].filter((f) => f.type.startsWith('image/'));
+  // Everything picked is tried, rather than only what the OS tagged image/*. A file that is not
+  // an image fails the decode below and gets named in the note — which is the point: a pick that
+  // was thrown away used to say nothing at all, and file.type is empty often enough that the
+  // filter dropped real photos too.
+  const files = [...fileList];
   if (!files.length) return;
   // Every read is started before any of them is awaited, so the decodes run side by side on
   // the browser's image threads instead of one after another — 12 phone photos took 2787ms
@@ -215,7 +240,6 @@ async function addFiles(fileList) {
     items.push({
       id: ++seq,
       img,
-      thumb: URL.createObjectURL(files[i]),
       dt,
       note: '',
       zoom: 1,
@@ -224,6 +248,13 @@ async function addFiles(fileList) {
       el: null,
     });
     refresh(true); // draw each photo as it lands, rather than leaving the page blank until the last
+  }
+  // Thumbnails come last, once every card is up. Scaling a bitmap down costs a canvas readback,
+  // and doing it inside the loop would put that in front of the next photo — the card box is
+  // already grey until then, which is where it was anyway while the browser decoded the original.
+  for (const it of items) {
+    const im = it.el.querySelector('img');
+    if (!im.getAttribute('src')) im.src = thumbUrl(it.img);
   }
   $('dropNote').textContent = skippedNote(skipped);
   $('dropNote').hidden = !skipped.length;
@@ -249,7 +280,6 @@ function buildCard(item) {
       <button class="down" title="아래로">↓</button>
       <button class="del" title="삭제">✕</button>
     </div>`;
-  el.querySelector('img').src = item.thumb;
   const dt = el.querySelector('.dt');
   const note = el.querySelector('.note');
   dt.value = toInputValue(item.dt);
@@ -262,7 +292,6 @@ function buildCard(item) {
   el.querySelector('.del').addEventListener('click', () => {
     items.splice(items.indexOf(item), 1);
     item.el?.remove();
-    URL.revokeObjectURL(item.thumb);
     refresh(true);
   });
   item.el = el;
@@ -689,7 +718,6 @@ $('font').addEventListener('change', () => refresh());
 $('locale').addEventListener('change', () => refresh());
 $('sort').addEventListener('click', () => { items.sort((a, b) => a.dt - b.dt); refresh(true); });
 $('clear').addEventListener('click', () => {
-  for (const it of items) URL.revokeObjectURL(it.thumb);
   items.length = 0;
   $('list').textContent = '';
   refresh(true);
