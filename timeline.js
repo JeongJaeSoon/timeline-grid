@@ -92,6 +92,48 @@ export function previewWidth(cssW, dpr = 1) {
   return Math.min(Math.max(Math.round(cssW * dpr) || 0, 320), SPEC.ref);
 }
 
+/* ---------- sharing ---------- */
+
+// The width the copy handed to a social app is rendered at, rather than the export's 3077.
+// Two reasons, and the second one is what the whole feature rests on:
+//   - Instagram's grid went 3:4 in 2025 and takes 1080x1440 without cropping, which is exactly
+//     this collage's aspect — the source template was already 3:4.
+//   - navigator.share() needs transient activation and, unlike ClipboardItem, has no way to be
+//     handed a promise, so the blob has to exist before the click rather than be made during it.
+//     At 1080 a page costs 33ms to render and encode against 3077's 192ms (median of 3, Chrome
+//     on macOS, rasterisation forced with getImageData), which is cheap enough to prepare on a
+//     debounce after every edit and have waiting by the time a button is pressed.
+export const SHARE_W = 1080;
+
+// `intent` is the documented web-intent endpoint, which prefills a composer but cannot carry an
+// image — none of the three can. Instagram has no intent at all: its web composer opens a file
+// picker, ignores a paste, and reads no query parameters, which is why it is null here and why
+// sharePlan() sends it down the download path.
+export const SERVICES = [
+  { id: 'instagram', label: 'Instagram', intent: null, home: 'https://www.instagram.com/' },
+  { id: 'threads', label: 'Threads', intent: 'https://www.threads.net/intent/post' },
+  { id: 'x', label: 'X', intent: 'https://x.com/intent/post' },
+];
+
+// How the image gets to `service` here and now. The answer is fixed by feature detection, not by
+// what happens during the click, so the UI can say in advance what pressing the button will do.
+export function sharePlan({ service, canShareFiles, canCopyImage }) {
+  if (canShareFiles) return 'share'; // the OS sheet, i.e. the actual app — mobile only in practice
+  if (service === 'instagram') return 'download'; // takes neither a paste nor a URL
+  return canCopyImage ? 'clipboard' : 'download';
+}
+
+export function intentUrl(service, text = '') {
+  const { intent, home } = SERVICES.find((s) => s.id === service) ?? {};
+  if (!intent) return home ?? '';
+  return text ? `${intent}?text=${encodeURIComponent(text)}` : intent;
+}
+
+// What goes in the composer: the notes the user already typed, in page order. The stamps are
+// left out — they are burned into the image, and repeating them as text reads like a caption
+// for a photo the reader can already see.
+export const shareText = (page) => page.map((p) => p.note).filter(Boolean).join(' · ');
+
 export function cellRect(i, W, cols = SPEC.cols) {
   const col = i % cols;
   const row = Math.floor(i / cols);

@@ -73,8 +73,23 @@
   .page { background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 14px; }
   .page canvas { width: 100%; height: auto; display: block; touch-action: none; cursor: grab; }
   .page canvas:active { cursor: grabbing; }
-  .page .row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .page .row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
   .page .row span { color: var(--muted); font-size: 13px; flex: 1; }
+
+  /* Square outline icon buttons, the shape shadcn's `variant="outline" size="icon"` gives.
+     The brand marks are inline SVG because they have to be: shadcn draws its icons from lucide,
+     and lucide carries no brand logos, so its own blocks paste the marks in by hand too. */
+  .share { display: flex; gap: 6px; }
+  .icon-btn {
+    width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center;
+    justify-content: center; color: var(--muted);
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .icon-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); background: var(--bg); }
+  .icon-btn svg { width: 16px; height: 16px; fill: currentColor; display: block; }
+  .hint, .status { color: var(--muted); font-size: 13px; }
+  .hint { margin: -6px 0 14px; }
+  .status { margin: 10px 0 0; min-height: 0; }
 
   .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
   @media (max-width: 640px) {
@@ -132,6 +147,7 @@
       <span class="grow"></span>
       <button id="dlAll" class="primary" disabled>전체 내려받기</button>
     </div>
+    <p class="hint" id="shareHint" hidden></p>
     <div id="pages"></div>
     <p class="empty" id="pagesEmpty">사진을 올리면 결과가 여기에 나타납니다.</p>
   </section>
@@ -140,7 +156,7 @@
 <script type="module">
 import {
   SPEC, FONTS, perPage, paginate, formatStamp, renderPage, previewWidth, exifDateTime,
-  cellRect, layoutFor,
+  cellRect, layoutFor, SHARE_W, SERVICES, sharePlan, intentUrl, shareText,
 } from './timeline.js';
 
 const EXPORT_W = SPEC.ref; // downloads come out at 3077px, same as the source
@@ -334,6 +350,7 @@ function drawPages() {
   const { stack } = currentFont();
   const host = $('pages');
   host.textContent = '';
+  shareRows = [];
   const canvases = pages.map((page, i) => {
     const box = document.createElement('div');
     box.className = 'page';
@@ -343,11 +360,35 @@ function drawPages() {
     const row = document.createElement('div');
     row.className = 'row';
     row.innerHTML = `<span>${i + 1}번째 장 · ${page.length}컷</span>`;
+
+    const share = document.createElement('div');
+    share.className = 'share';
+    const btns = SERVICES.map((s) => {
+      const b = document.createElement('button');
+      b.className = 'icon-btn';
+      b.type = 'button';
+      b.disabled = !shareBlobs[i]; // until the share copy of this page is ready
+      b.innerHTML = ICONS[s.id];
+      b.title = `${s.label}에 올리기`;
+      b.setAttribute('aria-label', `${i + 1}번째 장을 ${s.label}에 올리기`);
+      b.addEventListener('click', () => shareTo(s.id, i));
+      share.appendChild(b);
+      return b;
+    });
+    row.appendChild(share);
+
     const btn = document.createElement('button');
     btn.textContent = '이 장 내려받기';
     btn.addEventListener('click', () => download(page, i));
     row.appendChild(btn);
     box.appendChild(row);
+
+    const status = document.createElement('p');
+    status.className = 'status';
+    status.setAttribute('aria-live', 'polite');
+    box.appendChild(status);
+    shareRows.push({ btns, status });
+
     host.appendChild(box);
     return canvas;
   });
@@ -365,7 +406,9 @@ function drawPages() {
     });
   }
   $('pagesEmpty').hidden = pages.length > 0;
+  $('shareHint').hidden = pages.length === 0;
   $('dlAll').disabled = pages.length === 0;
+  scheduleShareBlobs(pages, cols);
   // The pass above may have drawn in the fallback face; redraw once the real one lands.
   ensureFont(captionText(rendered));
 }
@@ -499,17 +542,114 @@ function attachInteraction(canvas, meta) {
   }, { passive: false });
 }
 
-async function download(page, i) {
-  const { stack } = await loadFont(captionText(page)); // never export in the fallback face
-  const canvas = document.createElement('canvas');
-  renderPage(canvas, page, EXPORT_W, stack, currentCols());
-  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+const pageName = (i) => `timeline-${String(i + 1).padStart(2, '0')}.png`;
+
+function saveBlob(blob, name) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `timeline-${String(i + 1).padStart(2, '0')}.png`;
+  a.download = name;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// page -> PNG blob at `W`, in the picked face rather than whatever stood in for it.
+async function pageBlob(page, W, cols) {
+  const { stack } = await loadFont(captionText(page));
+  const canvas = document.createElement('canvas');
+  renderPage(canvas, page, W, stack, cols);
+  return new Promise((r) => canvas.toBlob(r, 'image/png'));
+}
+
+async function download(page, i) {
+  saveBlob(await pageBlob(page, EXPORT_W, currentCols()), pageName(i));
+}
+
+/* ---------- sharing ---------- */
+
+// Both answers depend on the browser and the MIME type, never on the particular image, so they
+// are settled once at load. canShare() has to be asked with a real File; a one-byte stand-in
+// gets the same answer as the page would, and asking now is what lets the UI say in advance
+// what a button press will do instead of finding out during it.
+const CAN_COPY_IMAGE = typeof ClipboardItem === 'function' && !!navigator.clipboard?.write;
+const CAN_SHARE_FILES = (() => {
+  try {
+    return !!navigator.canShare?.({ files: [new File([new Uint8Array(1)], 'a.png', { type: 'image/png' })] });
+  } catch {
+    return false;
+  }
+})();
+const PASTE = navigator.userAgent.includes('Mac') ? '⌘V' : 'Ctrl+V';
+
+// Brand marks from Simple Icons (CC0), pasted in rather than pulled from a package: this app has
+// no build and no dependencies, and shadcn's own icon set (lucide) carries no brand logos, so its
+// blocks inline them the same way. 24-unit viewBox filled with currentColor, sized by CSS.
+const ICONS = {
+  instagram: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.0301.084c-1.2768.0602-2.1487.264-2.911.5634-.7888.3075-1.4575.72-2.1228 1.3877-.6652.6677-1.075 1.3368-1.3802 2.127-.2954.7638-.4956 1.6365-.552 2.914-.0564 1.2775-.0689 1.6882-.0626 4.947.0062 3.2586.0206 3.6671.0825 4.9473.061 1.2765.264 2.1482.5635 2.9107.308.7889.72 1.4573 1.388 2.1228.6679.6655 1.3365 1.0743 2.1285 1.38.7632.295 1.6361.4961 2.9134.552 1.2773.056 1.6884.069 4.9462.0627 3.2578-.0062 3.668-.0207 4.9478-.0814 1.28-.0607 2.147-.2652 2.9098-.5633.7889-.3086 1.4578-.72 2.1228-1.3881.665-.6682 1.0745-1.3378 1.3795-2.1284.2957-.7632.4966-1.636.552-2.9124.056-1.2809.0692-1.6898.063-4.948-.0063-3.2583-.021-3.6668-.0817-4.9465-.0607-1.2797-.264-2.1487-.5633-2.9117-.3084-.7889-.72-1.4568-1.3876-2.1228C21.2982 1.33 20.628.9208 19.8378.6165 19.074.321 18.2017.1197 16.9244.0645 15.6471.0093 15.236-.005 11.977.0014 8.718.0076 8.31.0215 7.0301.0839m.1402 21.6932c-1.17-.0509-1.8053-.2453-2.2287-.408-.5606-.216-.96-.4771-1.3819-.895-.422-.4178-.6811-.8186-.9-1.378-.1644-.4234-.3624-1.058-.4171-2.228-.0595-1.2645-.072-1.6442-.079-4.848-.007-3.2037.0053-3.583.0607-4.848.05-1.169.2456-1.805.408-2.2282.216-.5613.4762-.96.895-1.3816.4188-.4217.8184-.6814 1.3783-.9003.423-.1651 1.0575-.3614 2.227-.4171 1.2655-.06 1.6447-.072 4.848-.079 3.2033-.007 3.5835.005 4.8495.0608 1.169.0508 1.8053.2445 2.228.408.5608.216.96.4754 1.3816.895.4217.4194.6816.8176.9005 1.3787.1653.4217.3617 1.056.4169 2.2263.0602 1.2655.0739 1.645.0796 4.848.0058 3.203-.0055 3.5834-.061 4.848-.051 1.17-.245 1.8055-.408 2.2294-.216.5604-.4763.96-.8954 1.3814-.419.4215-.8181.6811-1.3783.9-.4224.1649-1.0577.3617-2.2262.4174-1.2656.0595-1.6448.072-4.8493.079-3.2045.007-3.5825-.006-4.848-.0608M16.953 5.5864A1.44 1.44 0 1 0 18.39 4.144a1.44 1.44 0 0 0-1.437 1.4424M5.8385 12.012c.0067 3.4032 2.7706 6.1557 6.173 6.1493 3.4026-.0065 6.157-2.7701 6.1506-6.1733-.0065-3.4032-2.771-6.1565-6.174-6.1498-3.403.0067-6.156 2.771-6.1496 6.1738M8 12.0077a4 4 0 1 1 4.008 3.9921A3.9996 3.9996 0 0 1 8 12.0077"/></svg>`,
+  threads: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.263 11.097c-.03-3.486-1.92-5.586-5.111-5.586-2.13 0-3.922.963-4.863 2.499l2.062 1.438c.535-.843 1.272-1.543 2.628-1.543 1.528 0 2.318.85 2.544 2.431a15 15 0 0 0-2.236-.173c-4.125 0-6.068 1.867-6.068 4.336s1.943 3.99 4.804 3.99c3.139 0 5.013-2.115 5.781-4.735.798.361 1.348 1.204 1.348 2.47 0 3.387-3.907 5.232-7.22 5.232-4.885 0-8.077-3.207-8.077-8.424 0-6.392 4.223-10.487 9.9-10.487 3.808 0 5.69 1.671 6.97 3.914l2.108-1.475C21.44 2.078 18.331 0 13.663 0 6.227 0 1.168 5.277 1.168 12.934c0 7 4.953 11.066 10.856 11.066 4.878 0 9.809-2.846 9.809-7.716 0-2.545-1.46-4.231-3.569-5.187m-6.33 4.855c-1.077 0-2.026-.512-2.026-1.453 0-1.483 1.822-1.934 3.606-1.934.678 0 1.34.045 1.927.173-.422 1.927-1.671 3.215-3.508 3.214Z"/></svg>`,
+  x: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z"/></svg>`,
+};
+
+$('shareHint').textContent = CAN_SHARE_FILES
+  ? 'SNS 버튼을 누르면 공유 시트가 열립니다 — 거기서 앱을 고르면 그대로 올라갑니다.'
+  : CAN_COPY_IMAGE
+    ? `SNS 버튼을 누르면 이미지를 복사하고 작성창을 엽니다 — ${PASTE}로 붙여넣으세요. (Instagram은 붙여넣기를 받지 않아 파일로 내려갑니다.)`
+    : 'SNS 버튼을 누르면 이미지를 내려받고 작성창을 엽니다 — 작성창에서 그 파일을 고르세요.';
+
+// One blob per page, prepared on a debounce after edits settle and thrown away when they change.
+// Preparing it up front is the whole point: navigator.share() needs the click's transient
+// activation and cannot be handed a promise, so anything awaited inside the handler loses it on
+// WebKit. Nothing below the click is async — see SHARE_W in timeline.js for what that costs.
+let shareBlobs = [];
+let shareRows = []; // per page: the buttons to enable and the line to report into
+let shareTimer;
+let shareToken = 0;
+
+function scheduleShareBlobs(pages, cols) {
+  clearTimeout(shareTimer);
+  const token = ++shareToken;
+  shareBlobs = [];
+  showShareReady();
+  if (!pages.length) return;
+  shareTimer = setTimeout(async () => {
+    const made = [];
+    for (const page of pages) {
+      made.push(await pageBlob(page, SHARE_W, cols));
+      if (token !== shareToken) return; // an edit landed mid-batch; a newer one is on its way
+    }
+    shareBlobs = made;
+    showShareReady();
+  }, 400); // the settle time the gesture commit already uses
+}
+
+const showShareReady = () =>
+  shareRows.forEach((row, i) => row.btns.forEach((b) => { b.disabled = !shareBlobs[i]; }));
+
+const say = (i, text) => { if (shareRows[i]) shareRows[i].status.textContent = text; };
+
+function shareTo(service, i) {
+  const blob = shareBlobs[i];
+  if (!blob) return;
+  const { label } = SERVICES.find((s) => s.id === service);
+  const plan = sharePlan({ service, canShareFiles: CAN_SHARE_FILES, canCopyImage: CAN_COPY_IMAGE });
+
+  if (plan === 'share') {
+    navigator.share({ files: [new File([blob], pageName(i), { type: 'image/png' })] })
+      .then(() => say(i, `${label}에 보냈습니다.`))
+      .catch(() => {}); // the sheet was dismissed, which is not an error worth reporting
+    return;
+  }
+  if (plan === 'clipboard') {
+    // ClipboardItem is the one of the three that takes a promise, but the blob is already here.
+    navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      .catch(() => { saveBlob(blob, pageName(i)); say(i, `복사가 막혀 ${pageName(i)}으로 내려받았습니다.`); });
+    say(i, `이미지를 복사했습니다 — ${label} 작성창에서 ${PASTE}로 붙여넣으세요.`);
+  } else {
+    saveBlob(blob, pageName(i));
+    say(i, `${pageName(i)}을 내려받았습니다 — ${label} 작성창에서 이 파일을 고르세요.`);
+  }
+  const per = perPage(currentCols());
+  open(intentUrl(service, shareText(items.slice(i * per, i * per + per))), '_blank', 'noopener');
 }
 
 /* ---------- events ---------- */
