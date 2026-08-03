@@ -21,11 +21,19 @@ export const SPEC = {
   // string; Tinos at 48px measures 473x45, which is where the original 45px came from.
   capRef: '04:56, Thursday, July 09',
   capInkW: 445 / 3077,
-  // The source's two-line captions were spaced 50 / 48 / 50 px top-to-top at 45px type, where
-  // Tinos's caption ink measures 0.911em tall — 0.200em of clear air between the lines. Stored
-  // as that gap rather than as a fixed leading, because ink height varies a lot between faces
-  // (0.91em for Tinos, 1.08em for Noto Serif KR) and fixed leading left the latter 1.4px apart.
-  // Line pitch is therefore measured ink + this, which reproduces the source's 50px for Tinos.
+  // Clear air between caption lines, as a fraction of the em. Line pitch is measured ink + this,
+  // rather than a fixed leading, because ink height varies a lot between faces (0.91em for Tinos,
+  // 1.08em for Noto Serif KR) and a fixed leading closes on the taller-inked ones. (An earlier
+  // note put that at 1.4px for Noto Serif KR, which only holds if it were drawn at Tinos's 45px;
+  // at the size it is actually normalised to it is nearer 8px. Left unmeasured rather than
+  // restated — the rule below is what matters, not the number that motivated it.)
+  // The source's own two-line captions were spaced 50 / 48 / 50 px top-to-top at 45px type over
+  // ink measuring 0.911em, which is a gap of 0.2. This runs deliberately looser than that: 0.4
+  // puts Tinos at a 59.2px pitch against the source's 50px. It is the one layout number here that
+  // is a choice rather than a measurement, so it is the one that can be tuned — raise it and the
+  // captions breathe more, lower it and they tighten. The tests follow this value rather than
+  // pinning it; what they do enforce is that the caption band cannot grow into the photo above it
+  // or into the next row's, which it starts doing around 5.0. See the README's 캡션 폰트 section.
   lineGap: 0.4,
 };
 

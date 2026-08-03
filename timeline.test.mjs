@@ -1,6 +1,9 @@
 // node --test timeline.test.mjs
 // Every expected value here is a pixel measurement taken from the source carousel
-// (instagram.com/p/Daz6IEyEpT5). Touch the layout constants and these break.
+// (instagram.com/p/Daz6IEyEpT5). Touch the layout constants and these break — with one
+// exception. SPEC.lineGap is a choice rather than a measurement, so the expectations that
+// depend on it follow it instead of pinning it, and what bounds it is the clearance test:
+// the caption may not grow into the photo above it or into the next row's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -99,10 +102,29 @@ test('single-line caption reproduces the measured band 1172-1213', () => {
   near(b.bottom, 1213, 2, 'band bottom');
 });
 
-test('two-line caption reproduces the measured band 2495-2587', () => {
+// The source measured 2495-2587 for this caption, which is what its own 0.2 gap draws.
+// SPEC.lineGap is the one number here that is a choice rather than a measurement, so the
+// expectation is the source anchor plus whatever that choice adds — the band grows symmetrically,
+// half the extra gap onto each edge. This fails if drawCaption's geometry drifts; it does not
+// fail merely because the gap was tuned. What bounds the tuning is the next test, not this one.
+const SOURCE_GAP = 0.2;
+test('two-line caption grows symmetrically out of the measured band 2495-2587', () => {
   const b = capturedBand(['13:31, Thursday, July 09', 'Sheung Wan, Hong Kong'], 2540.5);
-  near(b.top, 2495, 2, 'band top');
-  near(b.bottom, 2587, 2, 'band bottom');
+  const grew = ((SPEC.lineGap - SOURCE_GAP) * TINOS.fontSize * W) / 2;
+  near(b.top, 2495 - grew, 2, 'band top');
+  near(b.bottom, 2587 + grew, 2, 'band bottom');
+});
+
+// This is what actually bounds SPEC.lineGap, and it is the bound worth having: both edges are
+// measured constants, so a gap wide enough to grow the caption into the photo above it or into
+// the next row's photo fails here. It is also the invariant the README leans on when it says the
+// chosen gap still leaves ~110px of air. Row 0, so the row top is 0.
+test('the caption band never grows into the photos around it', () => {
+  const b = capturedBand(['13:31, Thursday, July 09', 'Sheung Wan, Hong Kong'], SPEC.capCenter * W);
+  assert.ok(b.top > SPEC.photoH * W,
+    `caption overlaps the photo above it by ${(SPEC.photoH * W - b.top).toFixed(1)}px`);
+  assert.ok(b.bottom < SPEC.rowPitch * W,
+    `caption overlaps the next row's photo by ${(b.bottom - SPEC.rowPitch * W).toFixed(1)}px`);
 });
 
 // The invariant that makes swapping fonts safe. Nothing about the source is assumed: whatever
@@ -123,20 +145,25 @@ test('the ink band stays centered for any face', () => {
 });
 
 // What stays constant between two lines is the clear air, not the pitch — a face with taller
-// ink gets more pitch rather than losing its gap. For Tinos that lands back on the source's
-// measured 50px.
-test('line pitch tracks the face and reproduces the measured 50px', () => {
+// ink gets more pitch rather than losing its gap. That rule is the thing worth pinning; the gap
+// it is fed is a choice. At the source's own 0.2 the rule lands back on the source's 50px, which
+// is asserted here directly so the number is not lost when SPEC.lineGap moves.
+test('line pitch is measured ink plus the gap, whatever the face', () => {
   const pitch = (font) => {
     const drawn = [];
     drawCaption({ fillText: (t, x, y) => drawn.push(y) }, ['a', 'b'], 0, 0, W, font);
     return drawn[1] - drawn[0];
   };
-  assert.ok(SPEC.lineGap > 0, 'lines need clear air between them');
-  near(pitch(TINOS), 50, 0.3, 'Tinos line pitch');
   const fs = TINOS.fontSize * W;
+  assert.ok(SPEC.lineGap > 0, 'lines need clear air between them');
+  // What drawCaption applies: pitch is measured ink plus the gap, for any ink height.
   near(pitch(TINOS) - (TINOS.ascent + TINOS.descent) * fs, SPEC.lineGap * fs, 1e-9, 'Tinos gap');
   const tall = { ...TINOS, ascent: 0.9, descent: 0.3 };
   near(pitch(tall) - (1.2 * fs), SPEC.lineGap * fs, 1e-9, 'gap holds for taller ink');
+  // And that same rule, fed the source's own gap, lands back on the source's measured 50px —
+  // which is what still pins the face readings and capInkW to the original. Computed rather than
+  // drawn, so no test has to reach into SPEC and put a value back afterwards.
+  near((TINOS.ascent + TINOS.descent + SOURCE_GAP) * fs, 50, 0.3, "the source's own line pitch");
 });
 
 test('font lineup', () => {
